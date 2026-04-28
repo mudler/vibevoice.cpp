@@ -1,0 +1,85 @@
+// vibevoice_capi.h - flat C ABI for purego / dlopen integration.
+//
+// This is a *separate* header from vibevoice.h on purpose: it exposes a
+// stateless, file-path-oriented surface that matches what
+// LocalAI's go-purego backends expect (see backend/go/qwen3-tts-cpp/cpp/).
+//
+// Lifetime model: a single global engine, one load_model() per process,
+// many tts() / asr() calls. Mirrors qwen3-tts-cpp exactly so a purego
+// dlsym lookup and `purego.RegisterLibFunc` finds these symbols by name.
+//
+// Why a separate flat ABI instead of the existing vibevoice.h:
+//   * No opaque pointers — purego pinning lifetimes is fiddly.
+//   * No callee-allocated buffers — output via WAV path or caller-owned
+//     char buffer.
+//   * All return codes are int with 0 = success — every purego backend
+//     in LocalAI expects exactly that.
+
+#ifndef VIBEVOICE_CAPI_H
+#define VIBEVOICE_CAPI_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Loads the engine. Either or both model paths can be NULL:
+//   tts_model_path  - realtime-0.5b gguf, required for vv_capi_tts.
+//   asr_model_path  - asr-7b gguf,        required for vv_capi_asr.
+//   tokenizer_path  - tokenizer gguf,     required for either.
+//   voice_path      - voice gguf,         required for vv_capi_tts.
+//                     Multiple voices: re-call with a different path,
+//                     or pass NULL here and a per-call voice path to
+//                     vv_capi_tts.
+//   n_threads       - 0 → auto-detect.
+// Returns 0 on success, non-zero error code otherwise. Idempotent —
+// calling twice replaces the engine.
+int vv_capi_load(const char* tts_model_path,
+                 const char* asr_model_path,
+                 const char* tokenizer_path,
+                 const char* voice_path,
+                 int         n_threads);
+
+// Synthesize `text` into a 24 kHz mono WAV at `dst_wav_path`.
+//   voice_path        - if non-NULL/non-empty, override the loaded voice.
+//   n_diffusion_steps - 0 → 20 (default).
+//   cfg_scale         - 0.0 → 1.3 (default; 1.0 = no CFG).
+//   max_speech_frames - 0 → 200.
+//   seed              - 0 → random.
+int vv_capi_tts(const char* text,
+                const char* voice_path,
+                const char* dst_wav_path,
+                int         n_diffusion_steps,
+                float       cfg_scale,
+                int         max_speech_frames,
+                uint32_t    seed);
+
+// Transcribe `src_wav_path` into a JSON string written into the caller-
+// owned `out_json` buffer of size `out_capacity`. The JSON is the same
+// shape the model produces, e.g.
+//   [{"Start":0.0,"End":2.8,"Speaker":0,"Content":"…"}]
+// Returns:
+//    > 0 on success — the number of bytes written (excluding the NUL
+//                     terminator). The buffer is always NUL-terminated.
+//      0 if no transcription was produced.
+//    < 0 on error (see vv_status in vibevoice.h for the enum).
+//   If out_capacity is smaller than the produced JSON, returns the
+//   negative of the required size and writes the prefix that fit.
+int vv_capi_asr(const char* src_wav_path,
+                char*       out_json,
+                size_t      out_capacity,
+                int         max_new_tokens);
+
+// Free engine state. Optional — process exit also frees it.
+void vv_capi_unload(void);
+
+// Build / version info. Returns a pointer to a static string; do not free.
+const char* vv_capi_version(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // VIBEVOICE_CAPI_H

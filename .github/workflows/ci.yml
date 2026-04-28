@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    # Nightly closed-loop run. UTC: 04:00 daily.
+    - cron: '0 4 * * *'
+
+jobs:
+  build-and-test:
+    name: build + tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Light end-to-end coverage on every push: configure with
+      # VIBEVOICE_TEST_LARGE so the heavy tests at least *build* — they'll
+      # still skip at run-time if their env vars aren't set, which keeps
+      # build-and-test fast while catching link-time regressions.
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DVIBEVOICE_BUILD_TESTS=ON \
+            -DVIBEVOICE_TEST_LARGE=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Run tests
+        # Tests that require model files exit 77 (= skip) when their env
+        # vars aren't set. SKIP_RETURN_CODE=77 is wired in
+        # tests/CMakeLists.txt so they show as "Skipped" rather than
+        # "Failed" in the ctest summary.
+        run: ctest --test-dir build --output-on-failure
+
+  closed-loop:
+    # Heavy end-to-end: TTS (0.5B) → wav → ASR (7B) → assert recall.
+    # Pulls Q8_0 ggufs from mudler/vibevoice.cpp-models. Gated so PRs
+    # don't pay the ~16 GB download every push; runs on:
+    #   - workflow_dispatch (manual trigger)
+    #   - nightly schedule (cron above)
+    name: closed-loop TTS→ASR roundtrip
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    needs: build-and-test
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DVIBEVOICE_BUILD_TESTS=ON \
+            -DVIBEVOICE_TEST_LARGE=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Download quantized models from Hugging Face
+        run: |
+          set -e
+          python3 -m pip install --quiet huggingface_hub
+          mkdir -p models
+          python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          repo = "mudler/vibevoice.cpp-models"
+          for fname in [
+              "vibevoice-realtime-0.5B-q8_0.gguf",
+              "vibevoice-asr-q8_0.gguf",
+              "voice-en-Carter_man.gguf",
+              "tokenizer.gguf",
+          ]:
+              p = hf_hub_download(repo, fname, local_dir="models")
+              print("downloaded", p)
+          PY
+
+      - name: Run end-to-end tests (closed-loop + long-form ASR + capi + parity)
+        env:
+          VIBEVOICE_TTS_MODEL: ${{ github.workspace }}/models/vibevoice-realtime-0.5B-q8_0.gguf
+          VIBEVOICE_VOICE:     ${{ github.workspace }}/models/voice-en-Carter_man.gguf
+          VIBEVOICE_ASR_MODEL: ${{ github.workspace }}/models/vibevoice-asr-q8_0.gguf
+          VIBEVOICE_TOKENIZER: ${{ github.workspace }}/models/tokenizer.gguf
+          VIBEVOICE_CLI:       ${{ github.workspace }}/build/bin/vibevoice-cli
+        run: ctest --test-dir build -R "test_closed_loop|test_long_form_asr|test_capi|test_encoder_chunked_parity" --output-on-failure

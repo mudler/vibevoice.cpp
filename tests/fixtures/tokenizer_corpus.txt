@@ -1,0 +1,56 @@
+Hello, world!
+The quick brown fox jumps over the lazy dog.
+I'm learning C++ and it's going well.
+She said, "It's only 3:14 AM."
+He's tested 12 features, but they're not all stable.
+Don't fix what isn't broken.
+We've been waiting since 1999.
+What's the difference between 'a' and "a"?
+Pi is approximately 3.14159 (or 22/7).
+You can find me at user@example.com or +1-555-0123.
+There were 5 dogs, 12 cats, and 100 birds.
+HTML uses tags like <div>, <span>, and <a href="...">.
+Let me try    multiple   spaces and a tab here.
+First line.
+Second line.
+
+Empty line above and below.
+
+End.
+def fib(n):
+    if n < 2: return n
+    return fib(n-1) + fib(n-2)
+JSON: {"key": "value", "num": 42, "arr": [1, 2, 3]}
+Markdown: **bold** _italic_ `code` and a [link](https://example.com).
+Math: x^2 + y^2 = z^2; ∑ i = n(n+1)/2 (UTF-8).
+Emoji: hello 🌍 world 👋 (these may diverge in v1).
+Café résumé naïve façade — accented Latin should split as one letter run.
+Mixing English and 中文 in one line.
+Tabs	and	spaces	mix	together.
+She said,
+"OK!"
+Lines with
+trailing spaces.
+Hello
+World
+Multiple
+
+blank
+
+paragraphs.
+ALL CAPS SHOUTING.
+mixedCASE wOrDs.
+A1B2C3 letters and numbers interleaved.
+123 starts with digits.
+Path: /usr/local/bin/python3.11.
+URL: https://example.com/path?a=1&b=2#frag
+Quoted: ‘smart quotes’ and “curly”.
+Em-dash — and en-dash – and minus -.
+Unicode arrows: → ← ↑ ↓.
+Ellipsis... and more.
+Numbers: 1, 12, 123, 1234, 12345.
+Decimals: 0.1, 0.01, 1e-5, 1.234e5.
+A quote at end: "
+A single ' at end: '
+Just spaces:        .
+The end.
