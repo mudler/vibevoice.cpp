@@ -44,7 +44,7 @@ if(VIBEVOICE_TEST_LARGE)
                          test_encoder_chunked_parity
                          PROPERTIES SKIP_RETURN_CODE 77)
 endif()
-set_tests_properties(test_tokenizer test_rope test_qwen2_block test_sconv1d
-                     test_block1d test_acoustic test_diffusion_head test_dpm_solver
-                     test_load_realtime test_e2e_tts test_e2e_asr
+set_tests_properties(test_tokenizer test_rope test_qwen2_block test_qwen2_resident
+                     test_sconv1d test_block1d test_acoustic test_diffusion_head
+                     test_dpm_solver test_load_realtime test_e2e_tts test_e2e_asr
                      PROPERTIES SKIP_RETURN_CODE 77)
