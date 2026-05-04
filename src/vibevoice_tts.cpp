@@ -321,17 +321,11 @@ bool vibevoice_voice_load(const std::string&    path,
 namespace {
 
 
-void append_kv(LayerKV& kv, int hd, int n_kv, int new_len, const float* k_new, const float* v_new) {
-    const size_t step = static_cast<size_t>(hd) * n_kv;
-    kv.k.insert(kv.k.end(), k_new, k_new + step * new_len);
-    kv.v.insert(kv.v.end(), v_new, v_new + step * new_len);
-    kv.past_len += new_len;
-}
-
 // Build & run one forward pass through a Qwen2 stack.
 // `inputs_embeds`: [hidden, n_new_tokens, B=1]
 // `pos_start`:     absolute position of the first new token
-// `caches`:        per-layer KV (read & updated)
+// `kvs`:           resident K/V cache; new K/V written via ggml_cpy at
+//                  offset kvs.past_len, then kvs.past_len is advanced.
 // `out_hidden`:    if non-null, all output hidden states ([hidden * n_new_tokens])
 // `out_hidden_last`: if non-null, only the last token's hidden state ([hidden])
 bool run_qwen2_stack(struct ggml_context* /*ctx_ext*/,
@@ -341,32 +335,24 @@ bool run_qwen2_stack(struct ggml_context* /*ctx_ext*/,
                      int                  pos_start,
                      int                  n_new_tokens,
                      const float*         inputs_embeds,
-                     std::vector<LayerKV>* caches,
+                     ResidentKV*           kvs,
                      std::vector<float>*   out_hidden,            // optional
                      std::vector<float>*   out_hidden_last) {     // optional
     const int hidden = cfg.hidden;
-    const int hd     = cfg.head_dim;
-    const int n_kv   = cfg.n_kv_heads;
 
     Qwen2Hparams hp;
     hp.hidden_size       = hidden;
     hp.n_heads           = cfg.n_heads;
-    hp.n_kv_heads        = n_kv;
-    hp.head_dim          = hd;
-    hp.intermediate_size = 0;  // not used (mlp uses ffn_gate weight shape directly)
+    hp.n_kv_heads        = cfg.n_kv_heads;
+    hp.head_dim          = cfg.head_dim;
+    hp.intermediate_size = 0;
     hp.rope_theta        = cfg.rope_theta;
     hp.rms_norm_eps      = cfg.rms_norm_eps;
-    // Use flash attention when the active backend supports it. TTS calls
-    // this with small per-step windows (5 text tokens or 1 speech frame),
-    // but the K/V cache grows over the full utterance, so FA's bandwidth
-    // savings on K/V reads pay off in long generations as well.
     hp.use_flash_attn    = vv::backend_supports_flash_attn();
 
-    const int kv_len_old = caches->empty() ? 0 : caches->front().past_len;
+    const int kv_len_old = kvs->past_len;
     const int kv_len_new = kv_len_old + n_new_tokens;
 
-    // Backend-aware compute: graph metadata only in the ctx; inputs and
-    // intermediates land on the active backend's buffer.
     struct ggml_init_params p {};
     p.mem_size = ggml_tensor_overhead() * 16384
                + ggml_graph_overhead_custom(16384, false);
@@ -376,36 +362,33 @@ bool run_qwen2_stack(struct ggml_context* /*ctx_ext*/,
 
     struct ggml_tensor* x   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, hidden, n_new_tokens, 1);
     struct ggml_tensor* pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_new_tokens);
-    // Mask is F16: required by ggml_flash_attn_ext, accepted by the eager
-    // soft_max_ext fallback. One format works for both branches.
     struct ggml_tensor* mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, kv_len_new, n_new_tokens);
-    std::vector<struct ggml_tensor*> k_pasts(layers.size()), v_pasts(layers.size()),
-                                     k_news(layers.size()),  v_news(layers.size());
-    for (size_t li = 0; li < layers.size(); ++li) {
-        if (kv_len_old > 0) {
-            k_pasts[li] = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hd, n_kv, kv_len_old, 1);
-            v_pasts[li] = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hd, n_kv, kv_len_old, 1);
-        }
-    }
 
     struct ggml_tensor* h = x;
+    std::vector<struct ggml_tensor*> k_writes(layers.size()),
+                                     v_writes(layers.size());
     for (size_t li = 0; li < layers.size(); ++li) {
-        auto out = qwen2_layer_forward(ctx, h, pos, mask,
-                                       k_pasts[li], v_pasts[li], layers[li], hp);
-        h           = out.y;
-        k_news[li]  = out.k_full;
-        v_news[li]  = out.v_full;
+        auto out = qwen2_layer_forward_resident(ctx, h, pos, mask,
+                                                *kvs, static_cast<int>(li),
+                                                layers[li], hp);
+        h            = out.y;
+        k_writes[li] = out.k_write;
+        v_writes[li] = out.v_write;
     }
     if (output_norm) {
         h = rms_norm(ctx, h, output_norm, cfg.rms_norm_eps);
     }
 
     struct ggml_cgraph* gf = ggml_new_graph_custom(ctx, 16384, false);
-    ggml_build_forward_expand(gf, h);
+    // Interleave per-layer cpys (cpy_v_li MUST be in the graph before
+    // attention_(li+1) is added through k_write[li+1]'s expansion - same
+    // ordering rule as the ASR prefill, see test_qwen2_resident chain28
+    // one-graph case).
     for (size_t li = 0; li < layers.size(); ++li) {
-        ggml_build_forward_expand(gf, k_news[li]);
-        ggml_build_forward_expand(gf, v_news[li]);
+        ggml_build_forward_expand(gf, k_writes[li]);
+        ggml_build_forward_expand(gf, v_writes[li]);
     }
+    ggml_build_forward_expand(gf, h);
 
     ggml_backend_buffer_t in_buf = vv::allocate_ctx_tensors(ctx);
     if (!in_buf) { ggml_free(ctx); return false; }
@@ -424,15 +407,6 @@ bool run_qwen2_stack(struct ggml_context* /*ctx_ext*/,
         }
     }
     ggml_backend_tensor_set(mask, mask_v.data(), 0, sizeof(ggml_fp16_t) * mask_v.size());
-    if (kv_len_old > 0) {
-        for (size_t li = 0; li < layers.size(); ++li) {
-            const size_t per = static_cast<size_t>(hd) * n_kv * kv_len_old;
-            ggml_backend_tensor_set(k_pasts[li], (*caches)[li].k.data(),
-                                    0, sizeof(float) * per);
-            ggml_backend_tensor_set(v_pasts[li], (*caches)[li].v.data(),
-                                    0, sizeof(float) * per);
-        }
-    }
 
     if (!vv::compute_graph(gf)) {
         ggml_backend_buffer_free(in_buf); ggml_free(ctx); return false;
@@ -450,17 +424,7 @@ bool run_qwen2_stack(struct ggml_context* /*ctx_ext*/,
                                 sizeof(float) * hidden);
     }
 
-    if (caches->empty()) caches->assign(layers.size(), {});
-    for (size_t li = 0; li < layers.size(); ++li) {
-        const size_t per_full = static_cast<size_t>(hd) * n_kv * kv_len_new;
-        std::vector<float> k_full(per_full), v_full(per_full);
-        ggml_backend_tensor_get(k_news[li], k_full.data(), 0, sizeof(float) * per_full);
-        ggml_backend_tensor_get(v_news[li], v_full.data(), 0, sizeof(float) * per_full);
-        const size_t per_tok = static_cast<size_t>(hd) * n_kv;
-        append_kv((*caches)[li], hd, n_kv, n_new_tokens,
-                  k_full.data() + per_tok * kv_len_old,
-                  v_full.data() + per_tok * kv_len_old);
-    }
+    kvs->past_len = kv_len_new;
 
     ggml_backend_buffer_free(in_buf);
     ggml_free(ctx);
@@ -694,17 +658,47 @@ int vibevoice_tts_generate(VibeVoiceModel*           model,
         return -4;
     }
 
-    // State (initialised from voice if provided).
-    std::vector<LayerKV> kv_lm  = p.voice ? p.voice->kv_lm  : std::vector<LayerKV>(cfg.n_layers_lm);
-    std::vector<LayerKV> kv_tlm = p.voice ? p.voice->kv_tlm : std::vector<LayerKV>(cfg.n_layers_tlm);
+    // CFG parallel state probe (reads from voice prompt).
+    const bool use_cfg = p.voice && p.voice->has_neg && p.cfg_scale > 1.0f;
+
+    // Resident K/V caches. lm and tlm grow with text + (tlm only) speech
+    // frames. neg_tlm starts at the negative voice's seq_neg_tlm and
+    // grows by the same speech-frame count as tlm. We size for the
+    // pessimistic upper bound: voice prefix + n_text + max_speech_frames.
+    const int hd   = cfg.head_dim;
+    const int n_kv = cfg.n_kv_heads;
+    const int max_lm_seq      = (p.voice ? p.voice->seq_lm     : 0) + n_text                       + 32;
+    const int max_tlm_seq     = (p.voice ? p.voice->seq_tlm    : 0) + n_text + p.max_speech_frames + 32;
+    const int max_neg_tlm_seq = (use_cfg ? p.voice->seq_neg_tlm : 0)         + p.max_speech_frames + 32;
+
+    ResidentKV kv_lm, kv_tlm, kv_neg_tlm;
+    if (!kv_lm.init (cfg.n_layers_lm,  hd, n_kv, max_lm_seq))  return -5;
+    if (!kv_tlm.init(cfg.n_layers_tlm, hd, n_kv, max_tlm_seq)) return -5;
+    if (use_cfg && !kv_neg_tlm.init(cfg.n_layers_tlm, hd, n_kv, max_neg_tlm_seq)) return -5;
+
+    // Upload voice-prompt KV into the resident buffers. After this the
+    // host-side voice->kv_* vectors are no longer touched - the resident
+    // tensors are the source of truth for the rest of the call.
+    auto upload_kv = [hd, n_kv](ResidentKV& dst,
+                                const std::vector<LayerKV>& src,
+                                int seq_len) {
+        for (size_t li = 0; li < src.size(); ++li) {
+            const size_t per = static_cast<size_t>(hd) * n_kv * seq_len;
+            ggml_backend_tensor_set(dst.k[li], src[li].k.data(), 0, sizeof(float) * per);
+            ggml_backend_tensor_set(dst.v[li], src[li].v.data(), 0, sizeof(float) * per);
+        }
+        dst.past_len = seq_len;
+    };
+    if (p.voice) {
+        upload_kv(kv_lm,  p.voice->kv_lm,  p.voice->seq_lm);
+        upload_kv(kv_tlm, p.voice->kv_tlm, p.voice->seq_tlm);
+        if (use_cfg) upload_kv(kv_neg_tlm, p.voice->kv_neg_tlm, p.voice->seq_neg_tlm);
+    }
+
     int                  lm_pos  = p.voice ? p.voice->seq_lm  : 0;
     int                  tlm_pos = p.voice ? p.voice->seq_tlm : 0;
     std::vector<float>   tlm_hidden_last = p.voice ? p.voice->tlm_last_hidden
                                                    : std::vector<float>(hidden, 0.0f);
-
-    // CFG parallel state.
-    const bool use_cfg = p.voice && p.voice->has_neg && p.cfg_scale > 1.0f;
-    std::vector<LayerKV> kv_neg_tlm = use_cfg ? p.voice->kv_neg_tlm : std::vector<LayerKV>{};
     int                  neg_tlm_pos = use_cfg ? p.voice->seq_neg_tlm : 0;
     std::vector<float>   neg_tlm_hidden_last = use_cfg ? p.voice->neg_tlm_last_hidden
                                                        : std::vector<float>{};
