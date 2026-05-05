@@ -132,13 +132,19 @@ python scripts/convert_vibevoice_to_gguf.py \
   --attn-type     q5_k    \
   --lm-head-type  q8_0
 
-./build/bin/vibevoice-cli tts-15b \
+./build/bin/vibevoice-cli tts \
   --model     models/vibevoice-1.5B-q8_0.gguf \
   --tokenizer models/tokenizer.gguf \
   --ref-audio reference-voice.wav \
   --text      "Hello world, this is a test of voice cloning." \
   --out       cloned.wav
 ```
+
+The same `tts` subcommand handles both model families: pass `--voice
+<voice.gguf>` for the realtime-0.5B path, or `--ref-audio <wav>` for
+runtime voice cloning on the 1.5B path. The CLI dispatches based on
+the loaded gguf's variant metadata; the two flags are mutually
+exclusive.
 
 Note: voice cloning **only** works with the 1.5B variant. The
 realtime-0.5B weights ship without encoders, so they can't process a

@@ -109,6 +109,7 @@ int main() {
         "Hello world this is a test of voice cloning.";
 
     vv::VibeVoiceTTSParams p;
+    p.ref_audio_path    = ref_wav;
     p.max_speech_frames = 200;
     p.n_diffusion_steps = 20;
     p.cfg_scale         = 1.3f;
@@ -116,9 +117,9 @@ int main() {
     p.verbose           = false;
 
     std::vector<float> samples;
-    if (vv::vibevoice_tts_15b_generate(&m15, ref_wav, source, p, &samples) != 0
+    if (vv::vibevoice_tts_generate(&m15, source, p, &samples) != 0
         || samples.empty()) {
-        std::fprintf(stderr, "FAIL: tts_15b returned no audio\n"); return 4;
+        std::fprintf(stderr, "FAIL: vibevoice_tts_generate (1.5b) returned no audio\n"); return 4;
     }
     std::printf("[loop] TTS produced %zu samples (%.2fs)\n",
                 samples.size(), samples.size() / 24000.0);

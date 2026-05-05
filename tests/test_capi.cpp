@@ -80,7 +80,9 @@ int main() {
     const std::string source = "Hello world this is a capi smoke test.";
     const std::string wav    = "/tmp/vibevoice_capi_smoke.wav";
 
-    rc = vv_capi_tts(source.c_str(), /*voice_path=*/nullptr, wav.c_str(),
+    rc = vv_capi_tts(source.c_str(),
+                     /*voice_path=*/nullptr, /*ref_audio_path=*/nullptr,
+                     wav.c_str(),
                      /*steps=*/20, /*cfg=*/1.3f,
                      /*max_speech_frames=*/200, /*seed=*/0xCAFE);
     if (rc != 0) { std::fprintf(stderr, "FAIL: vv_capi_tts rc=%d\n", rc); return 2; }
@@ -112,10 +114,10 @@ int main() {
 
     // ---- 1.5B path (optional) ----
     // If VIBEVOICE_TTS_15B_MODEL + VIBEVOICE_REF_WAV are set, exercise
-    // vv_capi_tts_15b — the runtime voice-cloning entry point — and
-    // round-trip through ASR. Skipped silently otherwise so the
-    // existing realtime-only test still passes on contributors who
-    // haven't downloaded the 1.5B gguf.
+    // the unified vv_capi_tts entry point with `ref_audio_path` (runtime
+    // voice cloning) and round-trip through ASR. Skipped silently
+    // otherwise so the existing realtime-only test still passes on
+    // contributors who haven't downloaded the 1.5B gguf.
     const char* tts15b  = std::getenv("VIBEVOICE_TTS_15B_MODEL");
     const char* ref_wav = std::getenv("VIBEVOICE_REF_WAV");
     if (file_ok(tts15b) && file_ok(ref_wav)) {
@@ -126,10 +128,12 @@ int main() {
 
         const std::string source15b = "Hello world this is a capi smoke test for runtime voice cloning.";
         const std::string wav15b    = "/tmp/vibevoice_capi_15b.wav";
-        rc = vv_capi_tts_15b(source15b.c_str(), ref_wav, wav15b.c_str(),
-                             /*steps=*/20, /*cfg_scale=*/1.0f,
-                             /*max_speech_frames=*/200, /*seed=*/0xCAFE);
-        if (rc != 0) { std::fprintf(stderr, "FAIL: vv_capi_tts_15b rc=%d\n", rc); return 7; }
+        rc = vv_capi_tts(source15b.c_str(),
+                         /*voice_path=*/nullptr, /*ref_audio_path=*/ref_wav,
+                         wav15b.c_str(),
+                         /*steps=*/20, /*cfg_scale=*/1.3f,
+                         /*max_speech_frames=*/200, /*seed=*/0xCAFE);
+        if (rc != 0) { std::fprintf(stderr, "FAIL: vv_capi_tts (1.5b) rc=%d\n", rc); return 7; }
 
         std::memset(buf, 0, sizeof(buf));
         rc = vv_capi_asr(wav15b.c_str(), buf, sizeof(buf), /*max_new_tokens=*/256);

@@ -59,6 +59,7 @@ int main() {
     }
 
     vv::VibeVoiceTTSParams p;
+    p.ref_audio_path    = ref_wav;
     p.max_speech_frames = 64;          // short — smoke only
     p.n_diffusion_steps = 10;          // fewer steps for speed
     p.cfg_scale         = 1.0f;        // no CFG yet
@@ -66,8 +67,7 @@ int main() {
     p.verbose           = true;
 
     std::vector<float> samples;
-    int rc = vv::vibevoice_tts_15b_generate(
-        &model, ref_wav, "Hello world.", p, &samples);
+    int rc = vv::vibevoice_tts_generate(&model, "Hello world.", p, &samples);
     if (rc != 0) {
         std::fprintf(stderr, "FAIL: vibevoice_tts_15b_generate rc=%d\n", rc);
         return 4;

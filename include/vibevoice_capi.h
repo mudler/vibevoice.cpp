@@ -42,14 +42,22 @@ int vv_capi_load(const char* tts_model_path,
                  const char* voice_path,
                  int         n_threads);
 
-// Synthesize `text` into a 24 kHz mono WAV at `dst_wav_path`.
-//   voice_path        - if non-NULL/non-empty, override the loaded voice.
-//   n_diffusion_steps - 0 → 20 (default).
-//   cfg_scale         - 0.0 → 1.3 (default; 1.0 = no CFG).
-//   max_speech_frames - 0 → 200.
-//   seed              - 0 → random.
+// Synthesize `text` into a 24 kHz mono WAV at `dst_wav_path`. The TTS
+// path is selected by the loaded model's variant:
+//
+//   * realtime-0.5b -> uses `voice_path` (a pre-baked voice gguf).
+//                      `ref_audio_path` must be NULL.
+//   * 1.5b          -> uses `ref_audio_path` (raw 24 kHz mono WAV
+//                      conditioning the synthesis at run-time, i.e.
+//                      runtime voice cloning). `voice_path` must be NULL.
+//
+// Either of voice_path / ref_audio_path may be NULL when a value was
+// already supplied to vv_capi_load. n_diffusion_steps == 0 -> 20,
+// cfg_scale == 0 -> 1.3 (1.0 disables CFG), max_speech_frames == 0
+// -> 200, seed == 0 -> random.
 int vv_capi_tts(const char* text,
                 const char* voice_path,
+                const char* ref_audio_path,
                 const char* dst_wav_path,
                 int         n_diffusion_steps,
                 float       cfg_scale,
@@ -78,37 +86,9 @@ void vv_capi_unload(void);
 // Build / version info. Returns a pointer to a static string; do not free.
 const char* vv_capi_version(void);
 
-// Runtime voice cloning via the VibeVoice-1.5B model.
-//
-// The 1.5B model conditions on a raw reference WAV at synthesis time —
-// no separate voice-prep step or voice gguf is needed. Produced WAV is
-// 24 kHz mono PCM16 written to `dst_wav_path`.
-//
-//   ref_wav_path      - reference voice (24 kHz mono, ~5 s is plenty;
-//                       longer is OK but slower because of LM prefill).
-//   text              - what to say.
-//   n_diffusion_steps - 0 → 20.
-//   cfg_scale         - 0.0 → 1.3 (default). 1.0 disables CFG (faster).
-//                       Sweet spot 1.3-3.0; values >=5 over-amplify and
-//                       produce noise. CFG roughly doubles per-frame
-//                       cost (parallel negative-branch LM step).
-//   max_speech_frames - 0 → 200 (frame ≈ 67 ms of audio).
-//   seed              - 0 → random.
-//
-// Requires the engine to have been loaded with a 1.5B gguf as
-// `tts_model_path` (variant string == "1.5b" inside the gguf). Returns
-// 0 on success, non-zero on error.
-int vv_capi_tts_15b(const char* text,
-                    const char* ref_wav_path,
-                    const char* dst_wav_path,
-                    int         n_diffusion_steps,
-                    float       cfg_scale,
-                    int         max_speech_frames,
-                    uint32_t    seed);
-
 // Deprecated: voice-cloning via the realtime-0.5B + ASR-7B path is not
-// supported; the public realtime weights ship without encoders. Use
-// vv_capi_tts_15b for runtime voice cloning instead.
+// supported; the public realtime weights ship without encoders. Load
+// a 1.5B gguf and call vv_capi_tts with `ref_audio_path` instead.
 int vv_capi_voice_clone(const char* src_wav_path,
                         const char* dst_voice_gguf_path,
                         int         with_cfg);

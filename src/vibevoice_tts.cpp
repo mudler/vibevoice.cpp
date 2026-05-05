@@ -615,11 +615,32 @@ std::vector<float> decode_latent_sequence(const VibeVoiceConfig&  cfg,
 
 }  // namespace
 
+// Forward declaration — implementation later in this file.
+namespace {
+int tts_15b_generate(VibeVoiceModel*            model,
+                     const std::string&         ref_wav_path,
+                     const std::string&         text,
+                     const VibeVoiceTTSParams&  p,
+                     std::vector<float>*        samples);
+}
+
 int vibevoice_tts_generate(VibeVoiceModel*           model,
                            const std::string&        text,
                            const VibeVoiceTTSParams& p,
                            std::vector<float>*       samples) {
     if (!model || !samples) return -1;
+
+    // Variant dispatch — the gguf already knows which path it wants;
+    // callers don't need a separate entry point per model family.
+    if (model->variant == "1.5b") {
+        if (p.ref_audio_path.empty()) {
+            VV_LOG_ERROR("vibevoice_tts_generate: 1.5b model requires "
+                         "VibeVoiceTTSParams::ref_audio_path");
+            return -1;
+        }
+        return tts_15b_generate(model, p.ref_audio_path, text, p, samples);
+    }
+
     const auto& cfg = model->cfg;
     const auto& w   = model->w;
 
@@ -989,11 +1010,12 @@ void embed_row(struct ggml_tensor* tok_embd, int id, int hidden, float* dst) {
 
 }  // namespace
 
-int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
-                                const std::string&         ref_wav_path,
-                                const std::string&         text,
-                                const VibeVoiceTTSParams&  p,
-                                std::vector<float>*        samples) {
+namespace {
+int tts_15b_generate(VibeVoiceModel*            model,
+                     const std::string&         ref_wav_path,
+                     const std::string&         text,
+                     const VibeVoiceTTSParams&  p,
+                     std::vector<float>*        samples) {
     if (!model || !samples) return -1;
     if (model->variant != "1.5b") {
         VV_LOG_ERROR("tts_15b: model is variant=%s, expected 1.5b",
@@ -1298,5 +1320,6 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
         "[tts_15b] %d frames -> %zu samples\n", n_frames, samples->size());
     return 0;
 }
+}  // namespace
 
 }  // namespace vv
