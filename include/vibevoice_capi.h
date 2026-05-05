@@ -88,6 +88,10 @@ const char* vv_capi_version(void);
 //                       longer is OK but slower because of LM prefill).
 //   text              - what to say.
 //   n_diffusion_steps - 0 → 20.
+//   cfg_scale         - 0.0 → 1.0 (CFG off). Plumbed for future use;
+//                       current implementation degrades quality at
+//                       cfg_scale > 1.0 (negative-branch init likely
+//                       diverges from upstream — pending investigation).
 //   max_speech_frames - 0 → 200 (frame ≈ 67 ms of audio).
 //   seed              - 0 → random.
 //
@@ -98,6 +102,7 @@ int vv_capi_tts_15b(const char* text,
                     const char* ref_wav_path,
                     const char* dst_wav_path,
                     int         n_diffusion_steps,
+                    float       cfg_scale,
                     int         max_speech_frames,
                     uint32_t    seed);
 

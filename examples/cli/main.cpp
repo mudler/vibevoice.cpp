@@ -51,6 +51,10 @@ void print_usage(const char* argv0) {
         "  --out <path>        output WAV path (default: out.wav)\n"
         "  --max-frames N      cap speech frames (default 200)\n"
         "  --steps N           DPM-Solver inference steps (default 20)\n"
+        "  --cfg X             classifier-free guidance scale (default 1.0\n"
+        "                      = off; experimental, currently degrades\n"
+        "                      quality vs cfg=1 — see TODO in vibevoice_tts.cpp.\n"
+        "                      ~2x slower with CFG on)\n"
         "  --seed N            RNG seed for noise (default random)\n"
         "  --verbose           print per-frame progress\n"
         "\n"
@@ -194,6 +198,7 @@ int cmd_tts(int argc, char** argv) {
 int cmd_tts_15b(int argc, char** argv) {
     std::string model_path, tok_path, ref_audio, text, text_file, out_path = "out.wav";
     int   max_frames = 200, steps = 20;
+    float cfg_scale = 1.0f;  // CFG off by default — see help text.
     uint32_t seed = 0;
     bool  verbose = false;
 
@@ -207,6 +212,7 @@ int cmd_tts_15b(int argc, char** argv) {
         else if (a == "--out"        && (i + 1 < argc)) { out_path   = argv[++i]; }
         else if (a == "--max-frames" && (i + 1 < argc)) { max_frames = std::atoi(argv[++i]); }
         else if (a == "--steps"      && (i + 1 < argc)) { steps      = std::atoi(argv[++i]); }
+        else if (a == "--cfg"        && (i + 1 < argc)) { cfg_scale  = static_cast<float>(std::atof(argv[++i])); }
         else if (a == "--seed"       && (i + 1 < argc)) { seed       = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10)); }
         else if (a == "--verbose")                       { verbose = true; }
         else if (a == "-h" || a == "--help") {
@@ -253,7 +259,7 @@ int cmd_tts_15b(int argc, char** argv) {
     p.voice             = nullptr;     // not used by 1.5B path
     p.max_speech_frames = max_frames;
     p.n_diffusion_steps = steps;
-    p.cfg_scale         = 1.0f;        // CFG not implemented for 1.5B yet
+    p.cfg_scale         = cfg_scale;
     p.seed              = seed;
     p.verbose           = verbose;
 

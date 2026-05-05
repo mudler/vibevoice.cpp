@@ -218,6 +218,7 @@ int vv_capi_tts_15b(const char* text,
                     const char* ref_wav_path,
                     const char* dst_wav_path,
                     int         n_diffusion_steps,
+                    float       cfg_scale,
                     int         max_speech_frames,
                     uint32_t    seed) {
     auto& g = engine();
@@ -238,7 +239,7 @@ int vv_capi_tts_15b(const char* text,
     p.voice             = nullptr;
     p.n_diffusion_steps = n_diffusion_steps > 0 ? n_diffusion_steps : 20;
     p.max_speech_frames = max_speech_frames > 0 ? max_speech_frames : 200;
-    p.cfg_scale         = 1.0f;
+    p.cfg_scale         = cfg_scale > 0.0f ? cfg_scale : 1.0f;
     p.seed              = seed;
     p.verbose           = false;
 

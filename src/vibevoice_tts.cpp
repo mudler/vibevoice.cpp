@@ -940,6 +940,7 @@ namespace {
 constexpr int kSpeech15bStartId = 151652;  // <|vision_start|>
 constexpr int kSpeech15bEndId   = 151653;  // <|vision_end|>
 constexpr int kSpeech15bDiffId  = 151654;  // <|vision_pad|>
+constexpr int kSpeech15bImgPadId = 151655; // <|image_pad|> — negative branch
 constexpr int kSpeech15bCompressRatio = 3200;
 
 // Build the 1.5B prompt as a literal byte-BPE string. The tokenizer's
@@ -1127,6 +1128,49 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
     }
     int lm_pos = N;
 
+    // ---- 6b. negative branch (CFG) ----
+    // Mirrors upstream's streaming-inference negative prep: a single
+    // <|image_pad|> token, no audio context. The negative LM runs in
+    // parallel with the positive one, fed the same per-frame speech
+    // embeddings, providing an unconditioned signal for classifier-
+    // free guidance during diffusion.
+    //
+    // TODO(cfg-quality): with this exact analog of the streaming-model
+    // negative-branch wiring, cfg_scale > 1.0 currently *degrades*
+    // recall (closed-loop test goes from 88.9% at cfg=1.0 to 33% at
+    // 1.05 and to noise at 3.0). The plumbing is left in place for
+    // future debugging — most likely the 1.5B negative needs a richer
+    // initial state than the streaming model's single image_pad token,
+    // or upstream applies CFG at a different point in the loop. Until
+    // resolved, default cfg_scale = 1.0 (CFG off).
+    const bool use_cfg = (p.cfg_scale > 1.0f);
+    ResidentKV         kv_neg;
+    std::vector<float> neg_hidden_last;
+    int                neg_pos = 0;
+    if (use_cfg) {
+        if (!kv_neg.init(cfg.n_layers_lm, cfg.head_dim, cfg.n_kv_heads,
+                         /*max=*/p.max_speech_frames + 32)) {
+            VV_LOG_ERROR("tts_15b: neg KV init failed");
+            return -10;
+        }
+        std::vector<float> neg_embed(static_cast<size_t>(hidden));
+        embed_row(w.lm_tok_embd, kSpeech15bImgPadId, hidden, neg_embed.data());
+        if (!run_qwen2_stack(nullptr, cfg, w.lm_layers, w.tlm_output_norm,
+                             /*past_len=*/0, /*n_new=*/1, neg_embed.data(),
+                             &kv_neg, /*all_hidden_out=*/nullptr,
+                             &neg_hidden_last)) {
+            VV_LOG_ERROR("tts_15b: neg prefill failed");
+            return -11;
+        }
+        neg_pos = 1;
+        if (p.verbose) std::fprintf(stderr,
+            "[tts_15b] CFG on, scale=%.2f (neg branch ready)\n",
+            static_cast<double>(p.cfg_scale));
+    } else if (p.verbose) {
+        std::fprintf(stderr, "[tts_15b] CFG off (cfg_scale=%.2f)\n",
+                     static_cast<double>(p.cfg_scale));
+    }
+
     // ---- 7. speech-generation loop ----
     DPMSolverConfig solver_cfg;
     solver_cfg.num_train_timesteps = 1000;
@@ -1154,18 +1198,20 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
     bool finished     = false;
 
     while (!finished && total_frames < p.max_speech_frames) {
-        // 7a. sample one speech latent via DPM-Solver (no CFG in v1).
+        // 7a. sample one speech latent via DPM-Solver, optionally with CFG.
         std::vector<float> z(cfg.latent);
         for (auto& v : z) v = norm(rng);
 
         std::vector<float> cond(static_cast<size_t>(hidden));
         std::memcpy(cond.data(), hidden_last.data(), sizeof(float) * hidden);
 
-        std::vector<float> cond_neg;  // empty == CFG off
+        std::vector<float> cond_neg;
+        if (use_cfg) cond_neg.assign(neg_hidden_last.begin(), neg_hidden_last.end());
+
         if (dpm_solver_sample(z, cfg.latent, /*frames=*/1, /*batch=*/1,
                               cond, hidden,
                               w.dh, dh_cfg, solver_cfg, solver_state,
-                              cond_neg, /*cfg_scale=*/1.0f) != 0) {
+                              cond_neg, p.cfg_scale) != 0) {
             VV_LOG_ERROR("tts_15b: dpm_solver_sample failed at frame %d", total_frames);
             return -12;
         }
@@ -1174,7 +1220,7 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
         // 7b. project latent -> next-step LM input embedding.
         auto step_embed = run_speech_connector(cfg, w, z.data(), /*batch=*/1);
 
-        // 7c. step LM by 1 position with the speech embedding.
+        // 7c. step LM by 1 position with the speech embedding (positive).
         if (!run_qwen2_stack(nullptr, cfg, w.lm_layers, w.tlm_output_norm,
                              lm_pos, /*n_new=*/1, step_embed.data(),
                              &kv_lm, nullptr, &hidden_last)) {
@@ -1182,6 +1228,17 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
             return -13;
         }
         ++lm_pos;
+
+        // 7c'. negative branch sees the same speech embed.
+        if (use_cfg) {
+            if (!run_qwen2_stack(nullptr, cfg, w.lm_layers, w.tlm_output_norm,
+                                 neg_pos, /*n_new=*/1, step_embed.data(),
+                                 &kv_neg, nullptr, &neg_hidden_last)) {
+                VV_LOG_ERROR("tts_15b: neg LM step failed at frame %d", total_frames);
+                return -13;
+            }
+            ++neg_pos;
+        }
         ++total_frames;
 
         // 7d. speech-end detection from LM logits.
