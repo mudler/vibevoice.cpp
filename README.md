@@ -195,7 +195,7 @@ VIBEVOICE_BACKEND=cuda ./build/bin/vibevoice-cli asr \
 ## Tests
 
 ```bash
-ctest --test-dir build --output-on-failure   # 12 ctest targets
+ctest --test-dir build --output-on-failure   # 21 ctest targets
 ```
 
 For the real-weight tests:
@@ -215,8 +215,12 @@ the layout LocalAI's `qwen3-tts-cpp` Go backend uses:
 ```c
 int  vv_capi_load(const char* tts_model, const char* asr_model,
                   const char* tokenizer, const char* voice, int n_threads);
-int  vv_capi_tts(const char* text, const char* voice_path, const char* dst_wav,
-                 int steps, float cfg, int max_speech_frames, uint32_t seed);
+// `voice_path` is for realtime-0.5B, `ref_audio_path` is for 1.5B
+// (runtime voice cloning); pass NULL for whichever the loaded model
+// doesn't need.
+int  vv_capi_tts(const char* text, const char* voice_path, const char* ref_audio_path,
+                 const char* dst_wav, int steps, float cfg, int max_speech_frames,
+                 uint32_t seed);
 int  vv_capi_asr(const char* src_wav, char* out_json, size_t out_capacity,
                  int max_new_tokens);
 void vv_capi_unload(void);
@@ -229,7 +233,7 @@ import "github.com/ebitengine/purego"
 
 var (
     Load     func(tts, asr, tok, voice string, threads int) int
-    TTS      func(text, voice, dst string, steps int, cfg float32, maxFrames int, seed uint32) int
+    TTS      func(text, voice, refAudio, dst string, steps int, cfg float32, maxFrames int, seed uint32) int
     ASR      func(src string, out []byte, outCap uint64, maxTok int) int
     Unload   func()
 )

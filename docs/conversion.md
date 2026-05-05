@@ -59,10 +59,11 @@ python scripts/convert_vibevoice_to_gguf.py \
 
 Variants are auto-detected from the `architectures` field in `config.json`:
 
-| Variant         | Source repo                                                                       | Notes                                  |
-| --------------- | --------------------------------------------------------------------------------- | -------------------------------------- |
-| `realtime-0.5b` | `microsoft/VibeVoice-Realtime-0.5B`                                               | TTS, used by `vibevoice-cli tts`       |
-| `asr-7b`        | `microsoft/VibeVoice-ASR`                                                         | ASR, used by `vibevoice-cli asr`       |
+| Variant         | Source repo                                                                       | Notes                                                                |
+| --------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `realtime-0.5b` | `microsoft/VibeVoice-Realtime-0.5B`                                               | TTS, `vibevoice-cli tts --voice <voice.gguf>`                        |
+| `1.5b`          | `microsoft/VibeVoice-1.5B`                                                        | TTS with runtime voice cloning, `vibevoice-cli tts --ref-audio <wav>`|
+| `asr-7b`        | `microsoft/VibeVoice-ASR`                                                         | ASR, `vibevoice-cli asr`                                             |
 
 ### GGUF tensor naming
 
@@ -75,17 +76,17 @@ PyTorch module hierarchy. The notable patterns:
 | `model.language_model.layers.{i}.self_attn.{q,k,v,o}_proj.{weight,bias}`                     | `lm.blk.{i}.attn_{q,k,v,o}.{weight,bias}`       |
 | `model.language_model.layers.{i}.{input,post_attention}_layernorm.weight`                    | `lm.blk.{i}.{attn,ffn}_norm.weight`             |
 | `model.language_model.layers.{i}.mlp.{gate,up,down}_proj.weight`                             | `lm.blk.{i}.ffn_{gate,up,down}.weight`          |
-| `model.tts_language_model.layers.{j}.…`  (TTS only)                                          | `tlm.blk.{j}.…`                                 |
-| `model.tts_language_model.norm.weight`   (TTS only)                                          | `tlm.output_norm.weight`                        |
-| `model.tts_input_types.weight`            (TTS only)                                          | `tts.input_types.weight`                        |
+| `model.tts_language_model.layers.{j}.…`  (realtime only — split LM)                          | `tlm.blk.{j}.…`                                 |
+| `model.tts_language_model.norm.weight`   (realtime only)                                     | `tlm.output_norm.weight`                        |
+| `model.tts_input_types.weight`            (realtime only)                                    | `tts.input_types.weight`                        |
 | `model.acoustic_tokenizer.encoder.…`                                                          | `at.enc.…`                                      |
-| `model.acoustic_tokenizer.decoder.…`     (TTS only)                                          | `at.dec.…`                                      |
-| `model.semantic_tokenizer.…`             (ASR only)                                          | `st.…`                                          |
+| `model.acoustic_tokenizer.decoder.…`     (TTS variants — realtime + 1.5b)                    | `at.dec.…`                                      |
+| `model.semantic_tokenizer.…`             (ASR + 1.5b)                                        | `st.…`                                          |
 | `model.acoustic_connector.{linear1,norm,linear2}.…`                                          | `ac.{fc1,norm,fc2}.…`                           |
-| `model.semantic_connector.…`             (ASR only)                                          | `sc.…`                                          |
-| `model.prediction_head.…`                (TTS only)                                          | `dh.…`                                          |
-| `model.tts_eos_classifier.…`             (TTS only)                                          | `eos.…`                                         |
-| `lm_head.weight`                          (ASR only)                                          | `lm_head.weight`                                |
+| `model.semantic_connector.…`             (ASR + 1.5b)                                        | `sc.…`                                          |
+| `model.prediction_head.…`                (TTS variants — realtime + 1.5b)                    | `dh.…`                                          |
+| `model.tts_eos_classifier.…`             (realtime only)                                     | `eos.…`                                         |
+| `lm_head.weight`                          (ASR + 1.5b; for 1.5b synthesised from tied embed) | `lm_head.weight`                                |
 
 Pass `--strict` to fail the conversion if any source tensor key is left
 unmapped — useful when validating against a new upstream release.
