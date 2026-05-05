@@ -288,15 +288,40 @@ def main() -> int:
     sm  = cfg.get("semantic_tokenizer_config") or {}
     dh  = cfg.get("diffusion_head_config") or {}
 
-    # Variant detection from architectures + presence of tts_language_model
+    # Variant detection from architectures + tensor presence.
+    # ASR-7B and 1.5B share the `VibeVoice*ForConditionalGeneration` family
+    # but differ in what they ship: ASR has lm_head + no decoder/diffusion;
+    # 1.5B has decoder + prediction_head and ties lm_head to embed_tokens
+    # (so it does not appear as a separate key in safetensors).
     archs = cfg.get("architectures") or []
     arch  = archs[0] if archs else ""
+    tnames = [t[0] for t in tensors]
+    has_lm_head        = any(k.startswith("lm_head") for k in tnames)
+    has_prediction_hd  = any(k.startswith("dh.") for k in tnames)
+    has_at_decoder     = any(k.startswith("at.dec.") for k in tnames)
     if "Streaming" in arch or cfg.get("tts_backbone_num_hidden_layers"):
         variant = "realtime-0.5b"
-    elif "ASR" in arch or any(k.startswith("lm_head") for k in [t[0] for t in tensors]):
+    elif "ASR" in arch:
+        variant = "asr-7b"
+    elif has_prediction_hd and has_at_decoder:
+        variant = "1.5b"
+    elif has_lm_head:
         variant = "asr-7b"
     else:
         variant = cfg.get("model_type", "vibevoice")
+
+    # 1.5B ties lm_head to embed_tokens (cfg.decoder_config.tie_word_embeddings).
+    # The C++ loader expects an explicit `lm_head.weight` entry, so we materialise
+    # one by aliasing the token-embedding tensor.
+    if (variant == "1.5b"
+        and dec.get("tie_word_embeddings", False)
+        and not has_lm_head):
+        embd = next((arr for n, arr in tensors if n == "lm.tok_embd.weight"), None)
+        if embd is None:
+            sys.stderr.write("error: 1.5b variant missing lm.tok_embd.weight; "
+                             "cannot synthesise tied lm_head\n")
+            return 4
+        tensors.append(("lm_head.weight", embd))
 
     n_total      = dec["num_hidden_layers"]
     n_tts_layers = cfg.get("tts_backbone_num_hidden_layers", 0) or 0

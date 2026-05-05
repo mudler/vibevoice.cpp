@@ -30,6 +30,7 @@ vv_add_test(test_acoustic)
 vv_add_test(test_diffusion_head)
 vv_add_test(test_dpm_solver)
 vv_add_test(test_load_realtime)
+vv_add_test(test_load_15b)
 vv_add_test(test_e2e_tts)
 vv_add_test(test_e2e_asr)
 # Closed-loop TTS→ASR roundtrip. Requires both model gguf files (~16 GB),
@@ -47,5 +48,6 @@ if(VIBEVOICE_TEST_LARGE)
 endif()
 set_tests_properties(test_tokenizer test_rope test_qwen2_block test_qwen2_resident
                      test_sconv1d test_block1d test_acoustic test_diffusion_head
-                     test_dpm_solver test_load_realtime test_e2e_tts test_e2e_asr
+                     test_dpm_solver test_load_realtime test_load_15b
+                     test_e2e_tts test_e2e_asr
                      PROPERTIES SKIP_RETURN_CODE 77)
