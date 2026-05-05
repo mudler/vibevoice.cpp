@@ -67,6 +67,7 @@ bool vibevoice_load(const std::string& path, VibeVoiceModel* out) {
     out->variant = m.get_str("vibevoice.variant", "realtime-0.5b");
     const bool is_asr      = (out->variant == "asr-7b");
     const bool is_realtime = (out->variant == "realtime-0.5b");
+    const bool is_15b      = (out->variant == "1.5b");
 
     auto& c = out->cfg;
     c.hidden       = m.get_i32 ("vibevoice.hidden");
@@ -150,7 +151,34 @@ bool vibevoice_load(const std::string& path, VibeVoiceModel* out) {
         if (!load_decoder(m, "at.dec", c.acoustic, &w.at_dec)) return false;
     }
 
-    if (is_asr) {
+    if (is_15b) {
+        // ---- 1.5B: single-stack LM + diffusion head + decoder + encoders ----
+        // No EOS classifier (uses LM logits + speech_end token instead).
+        DiffusionHeadConfig dhc;
+        dhc.hidden      = c.hidden;
+        dhc.latent      = c.latent;
+        dhc.head_layers = c.head_layers;
+        dhc.ffn_ratio   = c.ffn_ratio;
+        dhc.eps         = c.rms_norm_eps;
+        dhc.freq_size   = 256;
+        if (!load_diffusion_head(m, "dh.", dhc, &w.dh)) return false;
+        if (!load_decoder(m, "at.dec", c.acoustic, &w.at_dec)) return false;
+        // Single LM stack: stash its final RMSNorm in tlm_output_norm so the
+        // run_qwen2_stack call site can reuse the same hook the realtime path
+        // uses for the upper stack.
+        w.tlm_output_norm = m.tensor("lm.output_norm.weight");
+        if (!w.tlm_output_norm) {
+            VV_LOG_ERROR("vibevoice_load: missing lm.output_norm.weight");
+            return false;
+        }
+        out->lm_head = m.tensor("lm_head.weight");
+        if (!out->lm_head) {
+            VV_LOG_ERROR("vibevoice_load: missing lm_head.weight");
+            return false;
+        }
+    }
+
+    if (is_asr || is_15b) {
         // ---- ASR-specific: encoders + semantic connector + lm_head ----
         // Encoder depths are forward order (3,3,3,3,3,3,8) — different from
         // the (reversed) decoder depths the TTS path uses.

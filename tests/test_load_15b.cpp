@@ -5,6 +5,7 @@
 // Skips with rc=77 when VIBEVOICE_TTS_15B_MODEL is missing.
 
 #include "model_loader.hpp"
+#include "vibevoice_tts.hpp"
 #include "ggml.h"
 
 #include <cstdio>
@@ -157,5 +158,42 @@ int main() {
 
     if (missing > 0)    return 4;
     if (unexpected > 0) return 5;
+
+    // Also verify the higher-level orchestrator load path branches to the
+    // 1.5b variant correctly: encoders, connectors, lm_head, diffusion head
+    // and decoder all populated; no realtime-only weights touched.
+    vv::VibeVoiceModel mm;
+    if (!vv::vibevoice_load(path, &mm)) {
+        std::fprintf(stderr, "FAIL: vv::vibevoice_load returned false\n");
+        return 6;
+    }
+    if (mm.variant != "1.5b") {
+        std::fprintf(stderr, "FAIL: model.variant=%s want 1.5b\n", mm.variant.c_str());
+        return 7;
+    }
+    if (mm.cfg.hidden != 1536 || mm.cfg.n_layers_lm != 28 || mm.cfg.n_layers_tlm != 0 ||
+        mm.cfg.head_dim != 128 || mm.cfg.latent != 64) {
+        std::fprintf(stderr, "FAIL: cfg dims wrong\n");
+        return 8;
+    }
+    if (!mm.w.lm_tok_embd || !mm.w.tlm_output_norm || !mm.lm_head ||
+        !mm.w.ac_fc1_w || !mm.sc_fc1_w ||
+        !mm.w.dh.cond_proj || !mm.w.at_dec.head.kernel) {
+        std::fprintf(stderr, "FAIL: required weights null after vibevoice_load\n");
+        return 9;
+    }
+    // Realtime-only weights must remain null:
+    if (mm.w.tts_input_types || mm.w.eos_fc1_w) {
+        std::fprintf(stderr, "FAIL: realtime-only weights wrongly populated for 1.5b\n");
+        return 10;
+    }
+    if (mm.at_enc.stem.kernel == nullptr || mm.st_enc.stem.kernel == nullptr) {
+        std::fprintf(stderr, "FAIL: at_enc / st_enc not populated\n");
+        return 11;
+    }
+
+    std::printf("vibevoice_load OK: variant=%s lm_layers=%d head_dim=%d "
+                "encoders+connectors+dh+decoder all live\n",
+                mm.variant.c_str(), mm.cfg.n_layers_lm, mm.cfg.head_dim);
     return 0;
 }
