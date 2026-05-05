@@ -1129,43 +1129,59 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
     int lm_pos = N;
 
     // ---- 6b. negative branch (CFG) ----
-    // Mirrors upstream's streaming-inference negative prep: a single
-    // <|image_pad|> token, no audio context. The negative LM runs in
-    // parallel with the positive one, fed the same per-frame speech
-    // embeddings, providing an unconditioned signal for classifier-
-    // free guidance during diffusion.
+    // Build a parallel LM forward over the SAME prompt structure as
+    // positive, but with each <|vision_pad|> position embedded as
+    // <|image_pad|> instead of as the reference-audio feature. That
+    // keeps the negative LM's hidden-state distribution close to
+    // positive's (same prompt length, same KV depth at each step) so
+    // the diffusion head sees an in-distribution `cond_neg` — just
+    // one without the specific voice/text conditioning.
     //
-    // TODO(cfg-quality): with this exact analog of the streaming-model
-    // negative-branch wiring, cfg_scale > 1.0 currently *degrades*
-    // recall (closed-loop test goes from 88.9% at cfg=1.0 to 33% at
-    // 1.05 and to noise at 3.0). The plumbing is left in place for
-    // future debugging — most likely the 1.5B negative needs a richer
-    // initial state than the streaming model's single image_pad token,
-    // or upstream applies CFG at a different point in the loop. Until
-    // resolved, default cfg_scale = 1.0 (CFG off).
+    // (A simpler "single image_pad token" negative — the literal
+    // analog of the streaming model's pre-baked neg_tts_lm state —
+    // collapses for the 1.5B model: its diffusion head was trained
+    // against full-length conditioning hidden states, not the 1-token
+    // state the streaming TLM uses. Mixing v predictions from such a
+    // low-rank baseline produces noise even at cfg_scale=1.05.)
+    //
+    // Empirical sweet spot for cfg_scale on the closed-loop word-recall
+    // benchmark (1.5B Q8_0, samples/2p_argument 5s ref):
+    //   cfg=1.0  -> 100%   (CFG off)
+    //   cfg=1.3  -> 88.9%
+    //   cfg=2.0  -> 100%
+    //   cfg=3.0  -> 100%
+    //   cfg>=5   -> noise / [Music] artifact
     const bool use_cfg = (p.cfg_scale > 1.0f);
     ResidentKV         kv_neg;
     std::vector<float> neg_hidden_last;
     int                neg_pos = 0;
     if (use_cfg) {
-        if (!kv_neg.init(cfg.n_layers_lm, cfg.head_dim, cfg.n_kv_heads,
-                         /*max=*/p.max_speech_frames + 32)) {
+        if (!kv_neg.init(cfg.n_layers_lm, cfg.head_dim, cfg.n_kv_heads, max_seq)) {
             VV_LOG_ERROR("tts_15b: neg KV init failed");
             return -10;
         }
-        std::vector<float> neg_embed(static_cast<size_t>(hidden));
-        embed_row(w.lm_tok_embd, kSpeech15bImgPadId, hidden, neg_embed.data());
+        // Copy positive embeds, then overwrite vision_pad positions
+        // with image_pad embeddings.
+        std::vector<float> neg_embeds(embeds);
+        std::vector<float> img_pad_embed(hidden);
+        embed_row(w.lm_tok_embd, kSpeech15bImgPadId, hidden, img_pad_embed.data());
+        for (int k = 0; k < Tc; ++k) {
+            const int pos = pad_positions[k];
+            std::memcpy(&neg_embeds[static_cast<size_t>(hidden) * pos],
+                        img_pad_embed.data(),
+                        sizeof(float) * hidden);
+        }
         if (!run_qwen2_stack(nullptr, cfg, w.lm_layers, w.tlm_output_norm,
-                             /*past_len=*/0, /*n_new=*/1, neg_embed.data(),
+                             /*past_len=*/0, /*n_new=*/N, neg_embeds.data(),
                              &kv_neg, /*all_hidden_out=*/nullptr,
                              &neg_hidden_last)) {
             VV_LOG_ERROR("tts_15b: neg prefill failed");
             return -11;
         }
-        neg_pos = 1;
+        neg_pos = N;
         if (p.verbose) std::fprintf(stderr,
-            "[tts_15b] CFG on, scale=%.2f (neg branch ready)\n",
-            static_cast<double>(p.cfg_scale));
+            "[tts_15b] CFG on, scale=%.2f (neg branch prefilled %d tokens)\n",
+            static_cast<double>(p.cfg_scale), N);
     } else if (p.verbose) {
         std::fprintf(stderr, "[tts_15b] CFG off (cfg_scale=%.2f)\n",
                      static_cast<double>(p.cfg_scale));

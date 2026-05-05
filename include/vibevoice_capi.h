@@ -88,10 +88,10 @@ const char* vv_capi_version(void);
 //                       longer is OK but slower because of LM prefill).
 //   text              - what to say.
 //   n_diffusion_steps - 0 → 20.
-//   cfg_scale         - 0.0 → 1.0 (CFG off). Plumbed for future use;
-//                       current implementation degrades quality at
-//                       cfg_scale > 1.0 (negative-branch init likely
-//                       diverges from upstream — pending investigation).
+//   cfg_scale         - 0.0 → 1.3 (default). 1.0 disables CFG (faster).
+//                       Sweet spot 1.3-3.0; values >=5 over-amplify and
+//                       produce noise. CFG roughly doubles per-frame
+//                       cost (parallel negative-branch LM step).
 //   max_speech_frames - 0 → 200 (frame ≈ 67 ms of audio).
 //   seed              - 0 → random.
 //

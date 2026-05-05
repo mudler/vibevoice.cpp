@@ -239,7 +239,7 @@ int vv_capi_tts_15b(const char* text,
     p.voice             = nullptr;
     p.n_diffusion_steps = n_diffusion_steps > 0 ? n_diffusion_steps : 20;
     p.max_speech_frames = max_speech_frames > 0 ? max_speech_frames : 200;
-    p.cfg_scale         = cfg_scale > 0.0f ? cfg_scale : 1.0f;
+    p.cfg_scale         = cfg_scale > 0.0f ? cfg_scale : 1.3f;
     p.seed              = seed;
     p.verbose           = false;
 

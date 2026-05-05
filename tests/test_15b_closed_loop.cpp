@@ -111,7 +111,7 @@ int main() {
     vv::VibeVoiceTTSParams p;
     p.max_speech_frames = 200;
     p.n_diffusion_steps = 20;
-    p.cfg_scale         = 1.0f;
+    p.cfg_scale         = 1.3f;
     p.seed              = 12345;
     p.verbose           = false;
 
