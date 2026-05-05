@@ -1,4 +1,6 @@
 #include "vibevoice_tts.hpp"
+#include "vibevoice_speech_helpers.hpp"
+#include "audio_io.hpp"
 #include "backend.hpp"
 #include "common.hpp"
 #include "rms_norm.hpp"
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <string>
 
 namespace vv {
 
@@ -910,6 +913,323 @@ int vibevoice_tts_generate(VibeVoiceModel*           model,
 
     if (p.verbose) std::fprintf(stderr, "[tts] decoded %zu samples from %d latents\n",
                                 samples->size(), n_frames);
+    return 0;
+}
+
+// ============================================================================
+// 1.5B path
+// ============================================================================
+//
+// The 1.5B model is structurally simpler than realtime: a single Qwen2.5-1.5B
+// LM stack feeds the diffusion head directly (no `tts_lm` split, no `eos`
+// classifier, no `tts.input_types` type embedding). Voice cloning is built
+// in: the prompt has placeholder `<|vision_pad|>` tokens whose embeddings are
+// replaced inline with features from the reference audio's at_enc + st_enc
+// + connectors (summed). The LM emits `<|vision_end|>` when it has finished
+// generating speech.
+//
+// Token IDs (from Qwen/Qwen2.5-1.5B vocab; the `VibeVoiceTextTokenizer`
+// repurposes the unused `vision_*` tokens for speech):
+//
+//   speech_start     = <|vision_start|>     = 151652
+//   speech_end       = <|vision_end|>       = 151653
+//   speech_diffusion = <|vision_pad|>       = 151654
+
+namespace {
+
+constexpr int kSpeech15bStartId = 151652;  // <|vision_start|>
+constexpr int kSpeech15bEndId   = 151653;  // <|vision_end|>
+constexpr int kSpeech15bDiffId  = 151654;  // <|vision_pad|>
+constexpr int kSpeech15bCompressRatio = 3200;
+
+// Build the 1.5B prompt as a literal byte-BPE string. The tokenizer's
+// special-token matching rewrites the bracketed markers into single token
+// IDs (151652 / 151653 / 151654 etc.) while the rest is regular text.
+//
+// Mirrors `VibeVoiceProcessor._create_voice_prompt` +
+// `VibeVoiceProcessor.__call__` from the upstream reference repo.
+std::string build_prompt_15b(int vae_tok_len, const std::string& text) {
+    std::string out;
+    out.reserve(2048 + vae_tok_len * 16);
+    out += " Transform the text provided by various speakers into speech "
+           "output, utilizing the distinct voice of each respective speaker.\n";
+    out += " Voice input:\n";
+    out += " Speaker 0:";
+    out += "<|vision_start|>";
+    for (int i = 0; i < vae_tok_len; ++i) out += "<|vision_pad|>";
+    out += "<|vision_end|>\n";
+    out += " Text input:\n";
+    out += " Speaker 0:";
+    out += text;
+    out += "\n";
+    out += " Speech output:\n";
+    out += "<|vision_start|>";
+    return out;
+}
+
+// Fetch a single row from `tok_embd` (handles fp32 / fp16). Caller passes
+// a destination buffer of `hidden` floats.
+void embed_row(struct ggml_tensor* tok_embd, int id, int hidden, float* dst) {
+    if (tok_embd->type == GGML_TYPE_F32) {
+        const size_t row = sizeof(float) * hidden;
+        ggml_backend_tensor_get(tok_embd, dst,
+                                row * static_cast<size_t>(id), row);
+    } else {
+        // fp16
+        const size_t row = sizeof(ggml_fp16_t) * hidden;
+        std::vector<ggml_fp16_t> staged(hidden);
+        ggml_backend_tensor_get(tok_embd, staged.data(),
+                                row * static_cast<size_t>(id), row);
+        for (int i = 0; i < hidden; ++i) {
+            dst[i] = ggml_fp16_to_fp32(staged[i]);
+        }
+    }
+}
+
+}  // namespace
+
+int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
+                                const std::string&         ref_wav_path,
+                                const std::string&         text,
+                                const VibeVoiceTTSParams&  p,
+                                std::vector<float>*        samples) {
+    if (!model || !samples) return -1;
+    if (model->variant != "1.5b") {
+        VV_LOG_ERROR("tts_15b: model is variant=%s, expected 1.5b",
+                     model->variant.c_str());
+        return -1;
+    }
+    if (!model->tokenizer.vocab_size()) {
+        VV_LOG_ERROR("tts_15b: tokenizer not loaded");
+        return -2;
+    }
+
+    const auto& cfg = model->cfg;
+    const auto& w   = model->w;
+    const int hidden = cfg.hidden;
+
+    samples->clear();
+
+    // ---- 1. load reference audio ----
+    std::vector<float> ref_audio;
+    if (load_wav_24k_mono(ref_wav_path.c_str(), &ref_audio) != 0 ||
+        ref_audio.empty()) {
+        VV_LOG_ERROR("tts_15b: failed to load reference WAV: %s",
+                     ref_wav_path.c_str());
+        return -3;
+    }
+
+    // RMS-normalize to -25 dBFS, mirrors the upstream AudioNormalizer +
+    // matches what the ASR encoder expects (same encoders, same convention).
+    {
+        const float target_dB_FS = -25.0f, eps = 1e-6f;
+        double sq = 0.0;
+        for (float v : ref_audio) sq += static_cast<double>(v) * v;
+        const float rms = static_cast<float>(std::sqrt(sq / std::max<size_t>(ref_audio.size(), 1)));
+        const float target_lin = std::pow(10.0f, target_dB_FS / 20.0f);
+        const float scalar = target_lin / (rms + eps);
+        for (auto& v : ref_audio) v *= scalar;
+        float maxabs = 0.0f;
+        for (float v : ref_audio) maxabs = std::max(maxabs, std::fabs(v));
+        if (maxabs > 1.0f) {
+            const float clip_div = maxabs + eps;
+            for (auto& v : ref_audio) v /= clip_div;
+        }
+    }
+
+    // ---- 2. acoustic + semantic encoders ----
+    std::vector<float> ac_lat, sm_lat;
+    int Tc_a = 0, Tc_s = 0;
+    if (!detail::run_encoder_buf(model->at_enc, cfg.acoustic, ref_audio,
+                                  &ac_lat, &Tc_a)) return -4;
+    if (!detail::run_encoder_buf(model->st_enc, model->semantic_cfg, ref_audio,
+                                  &sm_lat, &Tc_s)) return -4;
+    if (Tc_a != Tc_s) {
+        VV_LOG_ERROR("tts_15b: encoder frame mismatch %d vs %d", Tc_a, Tc_s);
+        return -5;
+    }
+    const int Tc = Tc_a;
+    if (p.verbose) std::fprintf(stderr,
+        "[tts_15b] ref %zu samples -> %d compressed frames\n",
+        ref_audio.size(), Tc);
+
+    // ---- 3. connectors -> per-frame speech features ----
+    auto ac_emb = detail::run_connector(w.ac_fc1_w, w.ac_fc1_b, w.ac_norm,
+                                         w.ac_fc2_w, w.ac_fc2_b,
+                                         ac_lat, cfg.vae_dim, Tc, hidden);
+    auto sm_emb = detail::run_connector(model->sc_fc1_w, model->sc_fc1_b, model->sc_norm,
+                                         model->sc_fc2_w, model->sc_fc2_b,
+                                         sm_lat, model->semantic_vae_dim, Tc, hidden);
+    if (ac_emb.size() != sm_emb.size()
+        || ac_emb.size() != static_cast<size_t>(hidden) * Tc) {
+        VV_LOG_ERROR("tts_15b: connector output size mismatch");
+        return -6;
+    }
+    std::vector<float> speech_features(static_cast<size_t>(hidden) * Tc);
+    for (size_t i = 0; i < speech_features.size(); ++i) {
+        speech_features[i] = ac_emb[i] + sm_emb[i];
+    }
+
+    // ---- 4. build prompt + tokenize ----
+    const std::string prompt = build_prompt_15b(Tc, text);
+    const auto input_ids = model->tokenizer.encode(prompt);
+    if (input_ids.empty()) {
+        VV_LOG_ERROR("tts_15b: tokenizer returned no tokens");
+        return -7;
+    }
+    const int N = static_cast<int>(input_ids.size());
+
+    std::vector<int> pad_positions;
+    pad_positions.reserve(Tc);
+    for (int i = 0; i < N; ++i) {
+        if (input_ids[i] == kSpeech15bDiffId) pad_positions.push_back(i);
+    }
+    if (static_cast<int>(pad_positions.size()) != Tc) {
+        VV_LOG_ERROR("tts_15b: prompt has %zu vision_pad tokens, want %d "
+                     "(tokenizer mis-decoding the speech markers?)",
+                     pad_positions.size(), Tc);
+        // Dump the first ~80 token ids for debugging.
+        std::fprintf(stderr, "tts_15b debug: prompt=%d tokens, first 80:\n  ",
+                     N);
+        for (int i = 0; i < std::min(80, N); ++i) {
+            std::fprintf(stderr, "%d ", input_ids[i]);
+        }
+        std::fprintf(stderr, "\n");
+        return -8;
+    }
+    if (p.verbose) std::fprintf(stderr,
+        "[tts_15b] prompt %d tokens, %d are speech-pad\n", N, Tc);
+
+    // ---- 5. embed prompt + splice speech features ----
+    std::vector<float> embeds(static_cast<size_t>(hidden) * N);
+    for (int t = 0; t < N; ++t) {
+        const int id = input_ids[t];
+        if (id < 0 || id >= cfg.vocab_size) {
+            VV_LOG_ERROR("tts_15b: token id out of range: %d", id);
+            return -9;
+        }
+        embed_row(w.lm_tok_embd, id, hidden, &embeds[hidden * t]);
+    }
+    for (int k = 0; k < Tc; ++k) {
+        const int pos = pad_positions[k];
+        std::memcpy(&embeds[static_cast<size_t>(hidden) * pos],
+                    &speech_features[static_cast<size_t>(hidden) * k],
+                    sizeof(float) * hidden);
+    }
+
+    // ---- 6. resident KV cache + LM prefill ----
+    const int max_seq = N + p.max_speech_frames + 32;
+    ResidentKV kv_lm;
+    if (!kv_lm.init(cfg.n_layers_lm, cfg.head_dim, cfg.n_kv_heads, max_seq)) {
+        VV_LOG_ERROR("tts_15b: resident KV init failed");
+        return -10;
+    }
+
+    std::vector<float> hidden_last;
+    if (!run_qwen2_stack(nullptr, cfg, w.lm_layers, w.tlm_output_norm,
+                         /*past_len=*/0, /*n_new=*/N, embeds.data(),
+                         &kv_lm, /*all_hidden_out=*/nullptr, &hidden_last)) {
+        VV_LOG_ERROR("tts_15b: prefill LM forward failed");
+        return -11;
+    }
+    int lm_pos = N;
+
+    // ---- 7. speech-generation loop ----
+    DPMSolverConfig solver_cfg;
+    solver_cfg.num_train_timesteps = 1000;
+    solver_cfg.num_inference_steps = p.n_diffusion_steps > 0 ? p.n_diffusion_steps : 20;
+    solver_cfg.solver_order        = 2;
+    solver_cfg.lower_order_final   = true;
+    DPMSolverState solver_state;
+    dpm_solver_init(solver_cfg, &solver_state);
+
+    DiffusionHeadConfig dh_cfg;
+    dh_cfg.hidden      = hidden;
+    dh_cfg.latent      = cfg.latent;
+    dh_cfg.head_layers = cfg.head_layers;
+    dh_cfg.ffn_ratio   = cfg.ffn_ratio;
+    dh_cfg.eps         = cfg.rms_norm_eps;
+    dh_cfg.freq_size   = 256;
+
+    std::mt19937 rng(p.seed ? p.seed : std::random_device{}());
+    std::normal_distribution<float> norm(0.0f, 1.0f);
+
+    std::vector<float> all_latents;
+    all_latents.reserve(static_cast<size_t>(p.max_speech_frames) * cfg.latent);
+
+    int  total_frames = 0;
+    bool finished     = false;
+
+    while (!finished && total_frames < p.max_speech_frames) {
+        // 7a. sample one speech latent via DPM-Solver (no CFG in v1).
+        std::vector<float> z(cfg.latent);
+        for (auto& v : z) v = norm(rng);
+
+        std::vector<float> cond(static_cast<size_t>(hidden));
+        std::memcpy(cond.data(), hidden_last.data(), sizeof(float) * hidden);
+
+        std::vector<float> cond_neg;  // empty == CFG off
+        if (dpm_solver_sample(z, cfg.latent, /*frames=*/1, /*batch=*/1,
+                              cond, hidden,
+                              w.dh, dh_cfg, solver_cfg, solver_state,
+                              cond_neg, /*cfg_scale=*/1.0f) != 0) {
+            VV_LOG_ERROR("tts_15b: dpm_solver_sample failed at frame %d", total_frames);
+            return -12;
+        }
+        all_latents.insert(all_latents.end(), z.begin(), z.end());
+
+        // 7b. project latent -> next-step LM input embedding.
+        auto step_embed = run_speech_connector(cfg, w, z.data(), /*batch=*/1);
+
+        // 7c. step LM by 1 position with the speech embedding.
+        if (!run_qwen2_stack(nullptr, cfg, w.lm_layers, w.tlm_output_norm,
+                             lm_pos, /*n_new=*/1, step_embed.data(),
+                             &kv_lm, nullptr, &hidden_last)) {
+            VV_LOG_ERROR("tts_15b: LM step failed at frame %d", total_frames);
+            return -13;
+        }
+        ++lm_pos;
+        ++total_frames;
+
+        // 7d. speech-end detection from LM logits.
+        auto logits = detail::lm_head_logits_last(model->lm_head, hidden_last,
+                                                   hidden, cfg.vocab_size);
+        if (static_cast<int>(logits.size()) == cfg.vocab_size) {
+            int   best_id = 0;
+            float best_v  = -std::numeric_limits<float>::infinity();
+            for (int i = 0; i < cfg.vocab_size; ++i) {
+                if (logits[i] > best_v) { best_v = logits[i]; best_id = i; }
+            }
+            if (p.verbose && (total_frames % 8 == 0 || best_id == kSpeech15bEndId)) {
+                std::fprintf(stderr, "[tts_15b] frame %d: argmax=%d (end=%d)\n",
+                             total_frames, best_id, kSpeech15bEndId);
+            }
+            if (best_id == kSpeech15bEndId) {
+                if (p.verbose) std::fprintf(stderr,
+                    "[tts_15b] speech_end at frame %d\n", total_frames);
+                finished = true;
+            }
+        }
+    }
+
+    // ---- 8. decode latents to waveform ----
+    const int n_frames = static_cast<int>(all_latents.size() / cfg.latent);
+    if (n_frames > 0) {
+        std::vector<float> scaled(all_latents.size());
+        for (size_t i = 0; i < all_latents.size(); ++i) {
+            scaled[i] = all_latents[i] / cfg.speech_scaling - cfg.speech_bias;
+        }
+        // Repack from per-frame [latent] to ggml-order [vae_dim, n_frames].
+        std::vector<float> packed(scaled.size());
+        for (int t = 0; t < n_frames; ++t) {
+            for (int d = 0; d < cfg.latent; ++d) {
+                packed[d * n_frames + t] = scaled[t * cfg.latent + d];
+            }
+        }
+        *samples = decode_latent_sequence(cfg, w, packed.data(), n_frames);
+    }
+    if (p.verbose) std::fprintf(stderr,
+        "[tts_15b] %d frames -> %zu samples\n", n_frames, samples->size());
     return 0;
 }
 

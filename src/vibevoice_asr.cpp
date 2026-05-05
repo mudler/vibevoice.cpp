@@ -1,4 +1,5 @@
 #include "vibevoice_asr.hpp"
+#include "vibevoice_speech_helpers.hpp"
 #include "backend.hpp"
 #include "common.hpp"
 #include "rms_norm.hpp"
@@ -310,6 +311,35 @@ std::vector<float> lm_head_logits_last(struct ggml_tensor* lm_head_w,
 }
 
 }  // namespace
+
+namespace detail {
+
+// Thin wrappers exposing the file-local helpers above so the 1.5B TTS
+// path (in vibevoice_tts.cpp) can reuse them without copy-pasting the
+// chunking / streaming-cache logic.
+bool run_encoder_buf(const EncoderWeights& w, const AcousticConfig& cfg,
+                     const std::vector<float>& audio,
+                     std::vector<float>* latents,
+                     int* T_compressed) {
+    return ::vv::run_encoder_buf(w, cfg, audio, latents, T_compressed);
+}
+std::vector<float> run_connector(struct ggml_tensor* fc1_w,
+                                 struct ggml_tensor* fc1_b,
+                                 struct ggml_tensor* norm_w,
+                                 struct ggml_tensor* fc2_w,
+                                 struct ggml_tensor* fc2_b,
+                                 const std::vector<float>& x,
+                                 int latent_dim, int T, int hidden) {
+    return ::vv::run_connector(fc1_w, fc1_b, norm_w, fc2_w, fc2_b,
+                               x, latent_dim, T, hidden);
+}
+std::vector<float> lm_head_logits_last(struct ggml_tensor* lm_head_w,
+                                       const std::vector<float>& hidden_last,
+                                       int hidden, int vocab) {
+    return ::vv::lm_head_logits_last(lm_head_w, hidden_last, hidden, vocab);
+}
+
+}  // namespace detail
 
 int vibevoice_asr_transcribe(VibeVoiceModel*           model,
                              const std::vector<float>& audio,

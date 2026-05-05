@@ -467,20 +467,53 @@ int Tokenizer::bpe_pretoken_to_ids(const std::string& pre_tok,
 
 std::vector<int32_t> Tokenizer::encode(const std::string& text) const {
     std::vector<int32_t> out;
-    auto pre = pre_tokenize(text);
-    for (const auto& pt : pre) {
-        // If this pre-token IS a special token verbatim, emit its id directly.
-        bool is_special = false;
+
+    // First pass: split `text` into a list of fragments — either a literal
+    // special-token (emitted as a single id) or a plain-text run that the
+    // pre-tokenizer + BPE handles. Without this top-level split the punct
+    // pattern in pre_tokenize() can greedily swallow the `<|` prefix of a
+    // bracketed special (e.g. "0:<|vision_start|>" is one punct run if no
+    // earlier rule peels off the special), which then masks the special-token
+    // identification at the BPE level.
+    const size_t n = text.size();
+    size_t i = 0;
+    auto flush_text = [&](size_t start, size_t end) {
+        if (end <= start) return;
+        std::string sub = text.substr(start, end - start);
+        auto pre = pre_tokenize(sub);
+        for (const auto& pt : pre) {
+            bool is_special = false;
+            for (const auto& sp : special_) {
+                if (sp.first == pt) {
+                    out.push_back(sp.second);
+                    is_special = true;
+                    break;
+                }
+            }
+            if (is_special) continue;
+            bpe_pretoken_to_ids(pt, out);
+        }
+    };
+
+    size_t text_start = 0;
+    while (i < n) {
+        bool matched = false;
         for (const auto& sp : special_) {
-            if (sp.first == pt) {
+            const auto& s = sp.first;
+            if (s.empty()) continue;
+            if (i + s.size() <= n &&
+                std::memcmp(text.data() + i, s.data(), s.size()) == 0) {
+                flush_text(text_start, i);
                 out.push_back(sp.second);
-                is_special = true;
+                i += s.size();
+                text_start = i;
+                matched = true;
                 break;
             }
         }
-        if (is_special) continue;
-        bpe_pretoken_to_ids(pt, out);
+        if (!matched) ++i;
     }
+    flush_text(text_start, n);
     return out;
 }
 

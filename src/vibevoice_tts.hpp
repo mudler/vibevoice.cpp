@@ -179,6 +179,19 @@ int vibevoice_tts_generate(VibeVoiceModel*           model,
                            const VibeVoiceTTSParams& p,
                            std::vector<float>*       samples);
 
+// 1.5B TTS path. Conditions on a raw reference audio file (the "voice
+// to clone") rather than a pre-baked voice gguf: encodes the WAV
+// inline through at_enc + st_enc + connectors, splices the resulting
+// speech features into the LM input embeddings at the speech-token
+// positions, then runs the diffusion + decoder loop until the LM
+// emits the speech-end token. `model` must be loaded from a 1.5B
+// gguf (variant == "1.5b"). Output samples are 24 kHz mono fp32.
+int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
+                                const std::string&         ref_wav_path,
+                                const std::string&         text,
+                                const VibeVoiceTTSParams&  p,
+                                std::vector<float>*        samples);
+
 }  // namespace vv
 
 #endif  // VIBEVOICE_TTS_HPP
