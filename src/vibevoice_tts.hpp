@@ -142,27 +142,6 @@ bool vibevoice_voice_load(const std::string&     path,
                           const VibeVoiceModel&  model,
                           VibeVoiceVoice*        out);
 
-// Runtime voice cloning: build a VibeVoiceVoice from a raw reference
-// audio file by running the model's acoustic + semantic encoders +
-// connectors + LM stack and capturing the resulting K/V state. The
-// produced voice is API-compatible with the pre-converted gguf voices.
-//
-// Requires `model` to carry the encoder weights (`at_enc`, `st_enc`,
-// `sc.*`) - i.e. the ASR-7B variant. The realtime-0.5B TTS gguf does
-// NOT include those weights today, so the typical CLI flow loads the
-// ASR model just for this one call, writes the resulting voice to a
-// gguf file, then unloads ASR + loads realtime + the new voice for
-// synthesis.
-//
-// Returns false if the model lacks encoder weights or the WAV cannot
-// be read. On success `*out` is fully populated (including the
-// negative branch, when `with_cfg` is true - matches the existing
-// shipped voice gguf format).
-bool vibevoice_voice_clone(const std::string&    wav_path,
-                           const VibeVoiceModel& model,
-                           bool                  with_cfg,
-                           VibeVoiceVoice*       out);
-
 struct VibeVoiceTTSParams {
     const VibeVoiceVoice* voice = nullptr;       // optional voice prompt
     int      max_speech_frames = 200;

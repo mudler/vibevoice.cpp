@@ -62,7 +62,6 @@ set(VIBEVOICE_SOURCES
     src/dpm_solver.cpp
     src/vibevoice_tts.cpp
     src/vibevoice_asr.cpp
-    src/vibevoice_voice.cpp
 )
 
 set(VIBEVOICE_PUBLIC_HEADERS
