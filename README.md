@@ -112,11 +112,25 @@ hf download microsoft/VibeVoice-1.5B --local-dir models/vibevoice-1.5B
 python scripts/convert_vibevoice_to_gguf.py \
   --src models/vibevoice-1.5B \
   --out models/vibevoice-1.5B.gguf
-# optional: shrink 11 GB -> 6.8 GB at the same closed-loop recall
+# shrink the gguf. Two recommended profiles for the 1.5B path:
+#
+#   1) Q8_0 across the board: 11 GB -> 6.8 GB, no measurable recall
+#      hit on the closed-loop benchmark.
 ./build/bin/vibevoice-quantize \
   --src  models/vibevoice-1.5B.gguf \
   --out  models/vibevoice-1.5B-q8_0.gguf \
   --type q8_0
+#
+#   2) Mixed: 11 GB -> 6.5 GB, same recall as fp32. FFN at Q6_K, attn
+#      at Q5_K, lm_head at Q8_0. Plain Q5_K across the board collapses
+#      this model (recall drops to 22%) — FFN weights are the most
+#      quant-sensitive piece, attention tolerates Q5_K well.
+./build/bin/vibevoice-quantize \
+  --src           models/vibevoice-1.5B.gguf \
+  --out           models/vibevoice-1.5B-mixed.gguf \
+  --type          q6_k    \
+  --attn-type     q5_k    \
+  --lm-head-type  q8_0
 
 ./build/bin/vibevoice-cli tts-15b \
   --model     models/vibevoice-1.5B-q8_0.gguf \

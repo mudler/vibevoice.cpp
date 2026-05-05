@@ -106,17 +106,30 @@ std::vector<float> to_f32(const ggml_tensor* t) {
 
 int main(int argc, char** argv) {
     std::string src, out, type_str = "q4_k";
+    std::string attn_type_str, ffn_type_str, lm_head_type_str;
     bool include_embed = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if      (a == "--src"           && i + 1 < argc) src      = argv[++i];
-        else if (a == "--out"           && i + 1 < argc) out      = argv[++i];
-        else if (a == "--type"          && i + 1 < argc) type_str = argv[++i];
+        if      (a == "--src"           && i + 1 < argc) src              = argv[++i];
+        else if (a == "--out"           && i + 1 < argc) out              = argv[++i];
+        else if (a == "--type"          && i + 1 < argc) type_str         = argv[++i];
+        else if (a == "--attn-type"     && i + 1 < argc) attn_type_str    = argv[++i];
+        else if (a == "--ffn-type"      && i + 1 < argc) ffn_type_str     = argv[++i];
+        else if (a == "--lm-head-type"  && i + 1 < argc) lm_head_type_str = argv[++i];
         else if (a == "--include-embed")                  include_embed = true;
         else if (a == "-h" || a == "--help") {
             std::fprintf(stderr,
                 "usage: %s --src in.gguf --out out.gguf --type <type>\n"
                 "  --type one of q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k f16 f32 bf16\n"
+                "  --attn-type <type>     override quant type for attention weights\n"
+                "                         (lm/tlm.blk.*.attn_[qkvo].weight) only.\n"
+                "  --ffn-type <type>      override quant type for FFN weights\n"
+                "                         (lm/tlm.blk.*.ffn_[gate|up|down].weight) only.\n"
+                "  --lm-head-type <type>  override quant type for lm_head.weight only.\n"
+                "                         lm_head drives speech-end + text logits and is\n"
+                "                         sensitive — for the 1.5B path, e.g.\n"
+                "                         --type q5_k --lm-head-type q8_0 lifts closed-loop\n"
+                "                         recall from 22%% to ~78%%.\n"
                 "  --include-embed   also quantize lm.tok_embd.weight (default: keep at source dtype)\n",
                 argv[0]);
             return 0;
@@ -130,6 +143,18 @@ int main(int argc, char** argv) {
     if (target == GGML_TYPE_COUNT) {
         std::fprintf(stderr, "unknown --type: %s\n", type_str.c_str()); return 1;
     }
+    auto resolve_override = [&](const std::string& s, const char* flag) -> ggml_type {
+        if (s.empty()) return target;
+        const ggml_type t = parse_type(s);
+        if (t == GGML_TYPE_COUNT) {
+            std::fprintf(stderr, "unknown %s: %s\n", flag, s.c_str());
+            std::exit(1);
+        }
+        return t;
+    };
+    const ggml_type attn_target    = resolve_override(attn_type_str,    "--attn-type");
+    const ggml_type ffn_target     = resolve_override(ffn_type_str,     "--ffn-type");
+    const ggml_type lm_head_target = resolve_override(lm_head_type_str, "--lm-head-type");
 
     if (ggml_quantize_requires_imatrix(target)) {
         std::fprintf(stderr,
@@ -184,17 +209,29 @@ int main(int argc, char** argv) {
         const size_t in_size = ggml_nbytes(st);
         bytes_in += in_size;
 
-        const int blk      = ggml_blck_size(target);
+        const std::string sname = name;
+        ggml_type tensor_target = target;
+        if (sname == "lm_head.weight") {
+            tensor_target = lm_head_target;
+        } else {
+            // Match attn vs ffn by the per-block tensor naming convention
+            // used by the convert script (attn_[qkvo] / ffn_[gate|up|down]).
+            const auto blk_attn = std::regex(R"(^(lm|tlm)\.blk\.\d+\.attn_[qkvo]\.weight$)");
+            const auto blk_ffn  = std::regex(R"(^(lm|tlm)\.blk\.\d+\.ffn_(gate|up|down)\.weight$)");
+            if (std::regex_match(sname, blk_attn))      tensor_target = attn_target;
+            else if (std::regex_match(sname, blk_ffn))  tensor_target = ffn_target;
+        }
+        const int blk      = ggml_blck_size(tensor_target);
         const bool wantq   = should_quantize(name, include_embed);
         const bool can_quant = (st->ne[0] % blk == 0);
         const bool do_quant  = wantq && can_quant;
         if (wantq && !can_quant) {
             std::fprintf(stderr,
-                "skip %s [ne0=%lld] — row not divisible by %s block size %d\n",
-                name, static_cast<long long>(st->ne[0]), type_str.c_str(), blk);
+                "skip %s [ne0=%lld] — row not divisible by block size %d\n",
+                name, static_cast<long long>(st->ne[0]), blk);
         }
 
-        ggml_type out_type = do_quant ? target : st->type;
+        ggml_type out_type = do_quant ? tensor_target : st->type;
         // Allocate the destination tensor in dst_ctx (no_alloc=true means
         // .data is null until we set it manually).
         ggml_tensor* dt = ggml_new_tensor(dst_ctx, out_type, ggml_n_dims(st), st->ne);
@@ -203,7 +240,7 @@ int main(int argc, char** argv) {
         const int64_t n_per_row = st->ne[0];
         const int64_t nrows     = static_cast<int64_t>(ggml_nelements(st)) / n_per_row;
         const size_t out_size = do_quant
-                                ? ggml_row_size(target, n_per_row) * nrows
+                                ? ggml_row_size(tensor_target, n_per_row) * nrows
                                 : in_size;
         kept.emplace_back();
         kept.back().resize(out_size);
@@ -212,14 +249,14 @@ int main(int argc, char** argv) {
         if (do_quant) {
             std::vector<float> src_f32 = to_f32(st);
             if (src_f32.empty()) { return 3; }
-            ggml_quantize_init(target);
+            ggml_quantize_init(tensor_target);
             const size_t produced = ggml_quantize_chunk(
-                target, src_f32.data(), kept.back().data(),
+                tensor_target, src_f32.data(), kept.back().data(),
                 /*start=*/0, nrows, n_per_row, /*imatrix=*/nullptr);
             if (produced != out_size) {
                 std::fprintf(stderr,
                     "ggml_quantize_chunk(%s, %s): produced %zu, expected %zu\n",
-                    name, type_str.c_str(), produced, out_size);
+                    name, ggml_type_name(tensor_target), produced, out_size);
                 return 4;
             }
             ++n_quant;
