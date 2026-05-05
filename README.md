@@ -101,6 +101,31 @@ python scripts/convert_voice_to_gguf.py --src /tmp/voice.pt --out models/voice.g
 This is the same roundtrip codified as `tests/test_closed_loop.cpp` - see
 [`docs/conversion.md`](docs/conversion.md) for how to wire it into ctest.
 
+## Quickstart - voice cloning (1.5B)
+
+The `microsoft/VibeVoice-1.5B` model conditions on a raw reference WAV
+at synthesis time — no separate voice gguf needed. Hand it ~5 s of any
+speaker and it'll synthesize new text in that voice.
+
+```bash
+hf download microsoft/VibeVoice-1.5B --local-dir models/vibevoice-1.5B
+python scripts/convert_vibevoice_to_gguf.py \
+  --src models/vibevoice-1.5B \
+  --out models/vibevoice-1.5B.gguf
+
+./build/bin/vibevoice-cli tts-15b \
+  --model     models/vibevoice-1.5B.gguf \
+  --tokenizer models/tokenizer.gguf \
+  --ref-audio reference-voice.wav \
+  --text      "Hello world, this is a test of voice cloning." \
+  --out       cloned.wav
+```
+
+Note: voice cloning **only** works with the 1.5B variant. The
+realtime-0.5B weights ship without encoders, so they can't process a
+reference WAV at runtime — they only consume pre-baked voice gguf
+files (see `scripts/convert_voice_to_gguf.py`).
+
 ## Quickstart - ASR
 
 ```bash
