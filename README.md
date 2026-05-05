@@ -112,9 +112,14 @@ hf download microsoft/VibeVoice-1.5B --local-dir models/vibevoice-1.5B
 python scripts/convert_vibevoice_to_gguf.py \
   --src models/vibevoice-1.5B \
   --out models/vibevoice-1.5B.gguf
+# optional: shrink 11 GB -> 6.8 GB at the same closed-loop recall
+./build/bin/vibevoice-quantize \
+  --src  models/vibevoice-1.5B.gguf \
+  --out  models/vibevoice-1.5B-q8_0.gguf \
+  --type q8_0
 
 ./build/bin/vibevoice-cli tts-15b \
-  --model     models/vibevoice-1.5B.gguf \
+  --model     models/vibevoice-1.5B-q8_0.gguf \
   --tokenizer models/tokenizer.gguf \
   --ref-audio reference-voice.wav \
   --text      "Hello world, this is a test of voice cloning." \
