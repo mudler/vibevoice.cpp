@@ -40,8 +40,9 @@ if(VIBEVOICE_TEST_LARGE)
     vv_add_test(test_long_form_asr)
     vv_add_test(test_capi)
     vv_add_test(test_encoder_chunked_parity)
+    vv_add_test(test_voice_clone)
     set_tests_properties(test_closed_loop test_long_form_asr test_capi
-                         test_encoder_chunked_parity
+                         test_encoder_chunked_parity test_voice_clone
                          PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 set_tests_properties(test_tokenizer test_rope test_qwen2_block test_qwen2_resident
