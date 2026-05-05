@@ -1088,13 +1088,6 @@ int vibevoice_tts_15b_generate(VibeVoiceModel*            model,
         VV_LOG_ERROR("tts_15b: prompt has %zu vision_pad tokens, want %d "
                      "(tokenizer mis-decoding the speech markers?)",
                      pad_positions.size(), Tc);
-        // Dump the first ~80 token ids for debugging.
-        std::fprintf(stderr, "tts_15b debug: prompt=%d tokens, first 80:\n  ",
-                     N);
-        for (int i = 0; i < std::min(80, N); ++i) {
-            std::fprintf(stderr, "%d ", input_ids[i]);
-        }
-        std::fprintf(stderr, "\n");
         return -8;
     }
     if (p.verbose) std::fprintf(stderr,

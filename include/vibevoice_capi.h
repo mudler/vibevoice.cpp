@@ -78,19 +78,32 @@ void vv_capi_unload(void);
 // Build / version info. Returns a pointer to a static string; do not free.
 const char* vv_capi_version(void);
 
-// Runtime voice cloning: read a reference WAV, run the loaded ASR
-// model's encoders + LM/TLM stacks, write the resulting voice K/V +
-// hidden states out to `dst_voice_gguf_path` in the same format as
-// `scripts/convert_voice_to_gguf.py`. The produced gguf can be passed
-// to vv_capi_tts via `voice_path` immediately.
+// Runtime voice cloning via the VibeVoice-1.5B model.
 //
-// Requires the engine to have been loaded with an ASR model that
-// carries the encoder weights (the realtime-0.5B TTS gguf does NOT).
-// Typical flow: vv_capi_load(NULL, asr_model, tok, NULL, threads)
-// followed by vv_capi_voice_clone(...), then vv_capi_unload + a
-// fresh vv_capi_load(realtime, NULL, tok, dst_voice_gguf_path, ...).
+// The 1.5B model conditions on a raw reference WAV at synthesis time —
+// no separate voice-prep step or voice gguf is needed. Produced WAV is
+// 24 kHz mono PCM16 written to `dst_wav_path`.
 //
-// Returns 0 on success, non-zero error code otherwise.
+//   ref_wav_path      - reference voice (24 kHz mono, ~5 s is plenty;
+//                       longer is OK but slower because of LM prefill).
+//   text              - what to say.
+//   n_diffusion_steps - 0 → 20.
+//   max_speech_frames - 0 → 200 (frame ≈ 67 ms of audio).
+//   seed              - 0 → random.
+//
+// Requires the engine to have been loaded with a 1.5B gguf as
+// `tts_model_path` (variant string == "1.5b" inside the gguf). Returns
+// 0 on success, non-zero on error.
+int vv_capi_tts_15b(const char* text,
+                    const char* ref_wav_path,
+                    const char* dst_wav_path,
+                    int         n_diffusion_steps,
+                    int         max_speech_frames,
+                    uint32_t    seed);
+
+// Deprecated: voice-cloning via the realtime-0.5B + ASR-7B path is not
+// supported; the public realtime weights ship without encoders. Use
+// vv_capi_tts_15b for runtime voice cloning instead.
 int vv_capi_voice_clone(const char* src_wav_path,
                         const char* dst_voice_gguf_path,
                         int         with_cfg);

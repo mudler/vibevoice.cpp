@@ -214,11 +214,57 @@ void vv_capi_unload(void) {
 
 const char* vv_capi_version(void) { return "vibevoice.cpp 0.1.0 (capi)"; }
 
+int vv_capi_tts_15b(const char* text,
+                    const char* ref_wav_path,
+                    const char* dst_wav_path,
+                    int         n_diffusion_steps,
+                    int         max_speech_frames,
+                    uint32_t    seed) {
+    auto& g = engine();
+    std::lock_guard<std::mutex> lk(g.mu);
+    if (!g.tts) {
+        VV_LOG_ERROR("vv_capi_tts_15b: TTS model not loaded (call vv_capi_load first)");
+        return -3;
+    }
+    if (g.tts->variant != "1.5b") {
+        VV_LOG_ERROR("vv_capi_tts_15b: TTS model is variant=%s; this entry "
+                     "point requires a 1.5B gguf",
+                     g.tts->variant.c_str());
+        return -3;
+    }
+    if (!text || !ref_wav_path || !dst_wav_path) return -2;
+
+    vv::VibeVoiceTTSParams p;
+    p.voice             = nullptr;
+    p.n_diffusion_steps = n_diffusion_steps > 0 ? n_diffusion_steps : 20;
+    p.max_speech_frames = max_speech_frames > 0 ? max_speech_frames : 200;
+    p.cfg_scale         = 1.0f;
+    p.seed              = seed;
+    p.verbose           = false;
+
+    std::vector<float> samples;
+    int rc = vv::vibevoice_tts_15b_generate(g.tts.get(), ref_wav_path, text,
+                                              p, &samples);
+    if (rc != 0) {
+        VV_LOG_ERROR("vv_capi_tts_15b: generate rc=%d", rc);
+        return rc;
+    }
+
+    vv_audio audio_out{};
+    audio_out.samples     = samples.data();
+    audio_out.n_samples   = samples.size();
+    audio_out.sample_rate = 24000;
+    audio_out.channels    = 1;
+    return vv::save_wav_pcm16(dst_wav_path, audio_out);
+}
+
 int vv_capi_voice_clone(const char* /*src_wav_path*/,
                         const char* /*dst_voice_gguf_path*/,
                         int         /*with_cfg*/) {
-    VV_LOG_ERROR("vv_capi_voice_clone: not implemented yet (Phase 4 - "
-                 "see plan; Phase 2 lands the in-process pipeline first)");
+    VV_LOG_ERROR("vv_capi_voice_clone: not supported. The realtime-0.5B "
+                 "weights ship without encoders, so we cannot prep a voice "
+                 "gguf at runtime. Use vv_capi_tts_15b for runtime voice "
+                 "cloning via the 1.5B model.");
     return -2;
 }
 
