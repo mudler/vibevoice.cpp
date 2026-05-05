@@ -78,6 +78,23 @@ void vv_capi_unload(void);
 // Build / version info. Returns a pointer to a static string; do not free.
 const char* vv_capi_version(void);
 
+// Runtime voice cloning: read a reference WAV, run the loaded ASR
+// model's encoders + LM/TLM stacks, write the resulting voice K/V +
+// hidden states out to `dst_voice_gguf_path` in the same format as
+// `scripts/convert_voice_to_gguf.py`. The produced gguf can be passed
+// to vv_capi_tts via `voice_path` immediately.
+//
+// Requires the engine to have been loaded with an ASR model that
+// carries the encoder weights (the realtime-0.5B TTS gguf does NOT).
+// Typical flow: vv_capi_load(NULL, asr_model, tok, NULL, threads)
+// followed by vv_capi_voice_clone(...), then vv_capi_unload + a
+// fresh vv_capi_load(realtime, NULL, tok, dst_voice_gguf_path, ...).
+//
+// Returns 0 on success, non-zero error code otherwise.
+int vv_capi_voice_clone(const char* src_wav_path,
+                        const char* dst_voice_gguf_path,
+                        int         with_cfg);
+
 #ifdef __cplusplus
 }
 #endif

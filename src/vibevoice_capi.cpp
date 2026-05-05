@@ -214,4 +214,12 @@ void vv_capi_unload(void) {
 
 const char* vv_capi_version(void) { return "vibevoice.cpp 0.1.0 (capi)"; }
 
+int vv_capi_voice_clone(const char* /*src_wav_path*/,
+                        const char* /*dst_voice_gguf_path*/,
+                        int         /*with_cfg*/) {
+    VV_LOG_ERROR("vv_capi_voice_clone: not implemented yet (Phase 4 - "
+                 "see plan; Phase 2 lands the in-process pipeline first)");
+    return -2;
+}
+
 }  // extern "C"
